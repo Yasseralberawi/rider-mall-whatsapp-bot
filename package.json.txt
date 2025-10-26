@@ -2,7 +2,7 @@
   "name": "rider-mall-whatsapp-bot",
   "version": "1.0.0",
   "main": "server.js",
-  "type": "module",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
