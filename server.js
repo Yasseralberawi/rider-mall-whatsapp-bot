@@ -1,5 +1,5 @@
-// server.js  (ESM) — Rider Mall WhatsApp Bot (Services + Diagnostics)
-// Requires env: WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, VERIFY_TOKEN
+// server.js (ESM) — Rider Mall WhatsApp Bot: Services Flow + Strong Diagnostics
+// Env needed: WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, VERIFY_TOKEN
 
 import express from 'express';
 import axios from 'axios';
@@ -14,42 +14,41 @@ app.use(cors());
 app.use(helmet());
 app.use(morgan('dev'));
 
-/* ------------------ DIAGNOSTICS ------------------ */
-// تنظيف التوكن من مسافات/اقتباسات عرضية
+/* ------------------ ENV & DIAGNOSTICS ------------------ */
 function cleanToken(raw = '') {
-  return (raw || '')
-    .trim()
-    .replace(/^[\"']|[\"']$/g, ''); // يشيل اقتباس بالبداية/النهاية
+  return (raw || '').trim().replace(/^[\"']|[\"']$/g, '');
 }
 
-// تأكد من وجود PHONE_ID
-const PHONE_ID = (process.env.WHATSAPP_PHONE_ID || '').trim();
 const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || 'rider-mall-verify').trim();
-
-// نظّف التوكن وخزّنه بنفس المتغيّر
+const PHONE_ID = (process.env.WHATSAPP_PHONE_ID || '').trim();
 process.env.WHATSAPP_TOKEN = cleanToken(process.env.WHATSAPP_TOKEN);
 const TOKEN = process.env.WHATSAPP_TOKEN || '';
 
-// اطبع معلومات تشخيصية *غير حساسة*
+const GRAPH_VERSION = 'v20.0';
+const GRAPH_URL = PHONE_ID
+  ? `https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_ID}/messages`
+  : `https://graph.facebook.com/${GRAPH_VERSION}/messages`; // سيكشف الخطأ إن كان PHONE_ID مفقود
+
+// اطبع معلومات تشخيصية (غير حساسة)
 const tokenHead = TOKEN.slice(0, 4);
 const tokenTail = TOKEN.slice(-4);
-console.log(
-  'DIAG: TOKEN length:',
-  TOKEN.length,
-  'head:',
-  tokenHead,
-  'tail:',
-  tokenTail
-);
-console.log('DIAG: PHONE_ID:', PHONE_ID ? '[OK]' : '[MISSING]');
+console.log('DIAG: TOKEN length:', TOKEN.length, 'head:', tokenHead, 'tail:', tokenTail);
+console.log('DIAG: PHONE_ID present?', Boolean(PHONE_ID), 'valueLen:', PHONE_ID.length);
+console.log('DIAG: GRAPH_URL:', GRAPH_URL);
 console.log('DIAG: VERIFY_TOKEN length:', VERIFY_TOKEN.length);
-
-// نسخة Graph API
-const GRAPH_VERSION = 'v20.0';
-const GRAPH_URL = `https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_ID}/messages`;
 
 /* ------------------ HELPERS ------------------ */
 async function sendWhatsApp(payload) {
+  // حواجز أمان: لا نرسل للـ Graph إذا البيئة ناقصة
+  if (!TOKEN || TOKEN.length < 50) {
+    console.error('ENV ERROR: WHATSAPP_TOKEN يبدو غير صالح (قصير/فارغ).');
+    return;
+  }
+  if (!PHONE_ID || !/^\d{6,}$/.test(PHONE_ID)) {
+    console.error('ENV ERROR: WHATSAPP_PHONE_ID مفقود أو ليس أرقامًا صحيحة.');
+    return;
+  }
+
   try {
     const { data } = await axios.post(GRAPH_URL, payload, {
       headers: {
@@ -231,14 +230,14 @@ app.post('/webhook', async (req, res) => {
 app.get('/', (_req, res) => res.send('Rider Mall WhatsApp bot is running.'));
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// Endpoint تشخيصي آمن: لا يطبع التوكن، فقط أطوال ومعلومات عامة
 app.get('/debug', (_req, res) => {
   res.json({
     token_length: TOKEN.length,
     token_head: tokenHead,
     token_tail: tokenTail,
     phone_id_present: Boolean(PHONE_ID),
-    graph_url: GRAPH_URL.replace(PHONE_ID, '***'),
+    phone_id_length: PHONE_ID.length,
+    graph_url: GRAPH_URL,
     verify_token_length: VERIFY_TOKEN.length,
   });
 });
