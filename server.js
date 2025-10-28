@@ -1,120 +1,90 @@
-// server.js
-require("dotenv").config();
-const express = require("express");
-const axios = require("axios");
-const cors = require("cors");
-const helmet = require("helmet");
-const morgan = require("morgan");
+// server.js (تشخيص مبسط)
+import express from "express";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
-app.use(cors());
-app.use(helmet());
-app.use(morgan("dev"));
 
-// ==== متغيرات البيئة ====
-const {
-  PORT = 5000,
-  VERIFY_TOKEN = "CHANGE_ME",
-  WHATSAPP_TOKEN = "",
-  PHONE_NUMBER_ID = "",
-} = process.env;
+// اقرأ المتغيّرات
+const TOKEN   = process.env.WHATSAPP_ACCESS_TOKEN;
+const PHONEID = process.env.PHONE_NUMBER_ID;
 
-// لاحظ استخدام v24.0 لتتوافق مع إعداداتك في Meta
-const WA_API = PHONE_NUMBER_ID
-  ? `https://graph.facebook.com/v24.0/${PHONE_NUMBER_ID}/messages`
-  : "";
-
-// صحّة السيرفر
-app.get("/", (_req, res) => {
-  res.send("✅ Rider Mall WhatsApp Bot server is running.");
+// اطبع حالة المتغيّرات عند الإقلاع
+console.log("[ENV CHECK]", {
+  hasToken: !!TOKEN,
+  tokenLen: TOKEN ? TOKEN.length : 0,
+  hasPhoneId: !!PHONEID,
+  phoneId: PHONEID || null,
 });
 
-// دالة إرسال نص عبر WhatsApp Cloud API
-async function sendText(to, text) {
-  if (!WA_API || !WHATSAPP_TOKEN) {
-    console.warn("WhatsApp credentials missing. Skipping send.");
-    return;
-  }
-  try {
-    await axios.post(
-      WA_API,
-      {
-        messaging_product: "whatsapp",
-        to,
-        type: "text",
-        text: { body: text },
-      },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
-  } catch (err) {
-    const payload = err.response?.data || err.message;
-    console.error("sendText error:", payload);
-  }
-}
+// health بسيط
+app.get("/", (_req, res) => res.status(200).send("OK"));
 
-// 1) تحقق الويبهوك من Meta (GET) — يتم مرة واحدة عند الربط
+app.get("/debug/env", (_req, res) => {
+  res.json({
+    hasToken: !!TOKEN,
+    tokenLen: TOKEN ? TOKEN.length : 0,
+    hasPhoneId: !!PHONEID,
+    phoneId: PHONEID || null,
+  });
+});
+
+// verify webhook
 app.get("/webhook", (req, res) => {
+  const verifyToken = process.env.VERIFY_TOKEN || "rider-mall-verify-2025";
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+  if (mode === "subscribe" && token === verifyToken) {
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
 });
 
-// 2) استقبال رسائل واتساب (POST)
+// receive & reply
 app.post("/webhook", async (req, res) => {
   try {
-    // بنية حدث واتساب
-    const entry = req.body?.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
+    // مهم: ردّ 200 بسرعة
+    res.sendStatus(200);
 
-    // إشعارات الحالة (read/delivered/status) نتجاهلها
-    if (value?.statuses?.length) {
-      return res.sendStatus(200);
+    const entry = req.body.entry?.[0];
+    const change = entry?.changes?.[0];
+    const message = change?.value?.messages?.[0];
+    const from = message?.from;
+    const text = message?.text?.body;
+
+    if (!from || !text) return;
+
+    if (!TOKEN || !PHONEID) {
+      console.log("WhatsApp credentials missing. Skipping send.");
+      return;
     }
 
-    const message = value?.messages?.[0];
-    const from = message?.from; // رقم المرسل بصيغة E.164 بدون +
-    const type = message?.type;
+    const reply = `Echo: ${text}`;
+    const url = `https://graph.facebook.com/v24.0/${PHONEID}/messages`;
 
-    if (from && type === "text") {
-      const text = message.text?.body?.trim() || "";
+    const payload = {
+      messaging_product: "whatsapp",
+      to: from, // مع الرمز الدولي كما يصل من واتساب
+      type: "text",
+      text: { body: reply }
+    };
 
-      // ردود بسيطة — طوّرها كما تشاء
-      if (/^hi\b|^hello\b/i.test(text)) {
-        await sendText(
-          from,
-          "Hello 👋 This is Rider Mall bot.\nاكتب: تسجيل / تأمين / فاحص / مساعدة."
-        );
-      } else if (/^(تسجيل|تاجيل|ترخيص)$/i.test(text)) {
-        await sendText(from, "📄 خدمة التسجيل: أرسل رقم المركبة والاسم الثلاثي.");
-      } else if (/^(تأمين|تامين)$/i.test(text)) {
-        await sendText(from, "🛡️ خدمة التأمين: أرسل نوع التأمين والمدة المطلوبة.");
-      } else if (/^(فاحص|فحص)$/i.test(text)) {
-        await sendText(from, "🔍 خدمة الفحص: أرسل الموقع والوقت المناسب.");
-      } else if (/^(مساعدة|ونش|طوارئ)$/i.test(text)) {
-        await sendText(from, "🆘 مساعدة الطريق: أرسل موقعك الحالي ورقم التواصل.");
-      } else {
-        await sendText(
-          from,
-          "أهلًا 👋 معك Rider Mall.\nاكتب: تسجيل / تأمين / فاحص / مساعدة."
-        );
-      }
-    }
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await r.json();
+    console.log("[WA SEND]", r.status, JSON.stringify(data));
   } catch (e) {
-    console.error("Webhook handler error:", e.response?.data || e.message);
+    console.error("Webhook error:", e);
   }
-
-  // دائمًا 200 حتى لا تعيد Meta الطلب
-  res.sendStatus(200);
 });
 
-// بدء السيرفر
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
