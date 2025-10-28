@@ -21,7 +21,7 @@ const {
 } = process.env;
 
 const WA_API = PHONE_NUMBER_ID
-  ? `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`
+  ? `https://graph.facebook.com/v24.0/${PHONE_NUMBER_ID}/messages`
   : "";
 
 // رسالة اختبار صحّة السيرفر
@@ -86,3 +86,4 @@ app.post("/webhook", async (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
