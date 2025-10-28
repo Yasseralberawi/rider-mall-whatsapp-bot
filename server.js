@@ -1,10 +1,11 @@
-// server.js (ESM) — Rider Mall WhatsApp Bot: Services Flow + Diagnostics (v24.0)
+// server.js (ESM) — Rider Mall WhatsApp Bot: Services + DB Logging (v24.0)
 
 import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import mongoose from 'mongoose';
 import 'dotenv/config';
 
 const app = express();
@@ -22,6 +23,7 @@ const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || 'rider-mall-verify').trim();
 const PHONE_ID = (process.env.WHATSAPP_PHONE_ID || '').trim();
 process.env.WHATSAPP_TOKEN = cleanToken(process.env.WHATSAPP_TOKEN);
 const TOKEN = process.env.WHATSAPP_TOKEN || '';
+const MONGODB_URI = (process.env.MONGODB_URI || '').trim();
 
 const GRAPH_VERSION = 'v24.0';
 const GRAPH_URL = PHONE_ID
@@ -34,6 +36,34 @@ console.log('DIAG: TOKEN length:', TOKEN.length, 'head:', tokenHead, 'tail:', to
 console.log('DIAG: PHONE_ID present?', Boolean(PHONE_ID), 'valueLen:', PHONE_ID.length);
 console.log('DIAG: GRAPH_URL:', GRAPH_URL);
 console.log('DIAG: VERIFY_TOKEN length:', VERIFY_TOKEN.length);
+console.log('DIAG: MONGODB_URI present?', Boolean(MONGODB_URI));
+
+/* ------------------ DB SETUP ------------------ */
+let RequestModel = null;
+
+async function initDB() {
+  if (!MONGODB_URI) {
+    console.warn('DB WARN: MONGODB_URI غير موجود — سيتم التشغيل بدون حفظ الطلبات.');
+    return;
+  }
+  if (mongoose.connection.readyState === 1) return; // already connected
+  try {
+    await mongoose.connect(MONGODB_URI, { dbName: 'rider_mall' });
+    const schema = new mongoose.Schema(
+      {
+        from: { type: String, required: true },
+        service: { type: String, required: true },
+        messageId: { type: String },
+      },
+      { timestamps: true }
+    );
+    RequestModel = mongoose.models.ServiceRequest || mongoose.model('ServiceRequest', schema);
+    console.log('DB: connected & model ready');
+  } catch (e) {
+    console.error('DB ERROR:', e.message);
+  }
+}
+initDB();
 
 /* ------------------ HELPERS ------------------ */
 async function sendWhatsApp(payload) {
@@ -134,6 +164,7 @@ function sendServiceConfirmation(to, serviceTitle) {
   return sendText(to, msg);
 }
 
+/* ------------------ LOGIC ------------------ */
 function isGreeting(text = '') {
   const t = text.trim().toLowerCase();
   return (
@@ -146,7 +177,6 @@ function isGreeting(text = '') {
 }
 
 /* ------------------ WEBHOOKS ------------------ */
-// Verify (GET)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -158,7 +188,6 @@ app.get('/webhook', (req, res) => {
   return res.sendStatus(403);
 });
 
-// Receiver (POST)
 app.post('/webhook', async (req, res) => {
   try {
     const entry = req.body?.entry?.[0];
@@ -174,7 +203,6 @@ app.post('/webhook', async (req, res) => {
     console.log('Incoming message:', JSON.stringify(msg, null, 2));
 
     if (type === 'text') {
-      const body = msg.text?.body || '';
       await sendWelcomeWithButton(from);
       return res.sendStatus(200);
     }
@@ -193,7 +221,22 @@ app.post('/webhook', async (req, res) => {
       if (interactive?.type === 'list_reply') {
         const rowId = interactive.list_reply?.id;
         const chosenTitle = interactive.list_reply?.title || serviceIdToTitle(rowId);
+
         if (rowId && chosenTitle) {
+          try {
+            if (RequestModel) {
+              await RequestModel.create({
+                from,
+                service: chosenTitle,
+                messageId: msg.id || undefined,
+              });
+            } else {
+              console.warn('DB WARN: RequestModel غير مهيأ — لن يتم حفظ الطلب.');
+            }
+          } catch (e) {
+            console.error('DB SAVE ERROR:', e.message);
+          }
+
           await sendServiceConfirmation(from, chosenTitle);
           return res.sendStatus(200);
         }
@@ -211,6 +254,19 @@ app.post('/webhook', async (req, res) => {
 /* ------------------ HEALTH & DEBUG ------------------ */
 app.get('/', (_req, res) => res.send('Rider Mall WhatsApp bot is running.'));
 app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// فحص سريع لآخر 20 طلب محفوظ
+app.get('/requests', async (_req, res) => {
+  try {
+    if (!RequestModel) return res.json({ ok: true, saved: false, items: [] });
+    const items = await RequestModel.find().sort({ createdAt: -1 }).limit(20).lean();
+    res.json({ ok: true, saved: true, count: items.length, items });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// تشخيص شامل
 app.get('/debug', (_req, res) => {
   res.json({
     token_length: TOKEN.length,
@@ -220,6 +276,8 @@ app.get('/debug', (_req, res) => {
     phone_id_length: PHONE_ID.length,
     graph_url: GRAPH_URL,
     verify_token_length: VERIFY_TOKEN.length,
+    mongodb_uri_present: Boolean(MONGODB_URI),
+    mongo_ready_state: mongoose.connection.readyState,
   });
 });
 
