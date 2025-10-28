@@ -1,6 +1,5 @@
-// server.js  (ESM version)
-// Rider Mall - WhatsApp Bot (Services focus)
-// Requires: WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, VERIFY_TOKEN
+// server.js  (ESM) — Rider Mall WhatsApp Bot (Services + Diagnostics)
+// Requires env: WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, VERIFY_TOKEN
 
 import express from 'express';
 import axios from 'axios';
@@ -15,13 +14,41 @@ app.use(cors());
 app.use(helmet());
 app.use(morgan('dev'));
 
-// ====== ENV / Graph API Setup ======
-const TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_ID = process.env.WHATSAPP_PHONE_ID; // e.g. "1234567890"
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'rider-mall-verify';
-const GRAPH_URL = `https://graph.facebook.com/v20.0/${PHONE_ID}/messages`;
+/* ------------------ DIAGNOSTICS ------------------ */
+// تنظيف التوكن من مسافات/اقتباسات عرضية
+function cleanToken(raw = '') {
+  return (raw || '')
+    .trim()
+    .replace(/^[\"']|[\"']$/g, ''); // يشيل اقتباس بالبداية/النهاية
+}
 
-// ====== Helpers ======
+// تأكد من وجود PHONE_ID
+const PHONE_ID = (process.env.WHATSAPP_PHONE_ID || '').trim();
+const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || 'rider-mall-verify').trim();
+
+// نظّف التوكن وخزّنه بنفس المتغيّر
+process.env.WHATSAPP_TOKEN = cleanToken(process.env.WHATSAPP_TOKEN);
+const TOKEN = process.env.WHATSAPP_TOKEN || '';
+
+// اطبع معلومات تشخيصية *غير حساسة*
+const tokenHead = TOKEN.slice(0, 4);
+const tokenTail = TOKEN.slice(-4);
+console.log(
+  'DIAG: TOKEN length:',
+  TOKEN.length,
+  'head:',
+  tokenHead,
+  'tail:',
+  tokenTail
+);
+console.log('DIAG: PHONE_ID:', PHONE_ID ? '[OK]' : '[MISSING]');
+console.log('DIAG: VERIFY_TOKEN length:', VERIFY_TOKEN.length);
+
+// نسخة Graph API
+const GRAPH_VERSION = 'v20.0';
+const GRAPH_URL = `https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_ID}/messages`;
+
+/* ------------------ HELPERS ------------------ */
 async function sendWhatsApp(payload) {
   try {
     const { data } = await axios.post(GRAPH_URL, payload, {
@@ -32,7 +59,8 @@ async function sendWhatsApp(payload) {
     });
     return data;
   } catch (err) {
-    console.error('WhatsApp API Error:', err?.response?.data || err.message);
+    const resp = err?.response?.data || err.message;
+    console.error('WhatsApp API Error:', JSON.stringify(resp, null, 2));
   }
 }
 
@@ -115,7 +143,6 @@ function sendServiceConfirmation(to, serviceTitle) {
   return sendText(to, msg);
 }
 
-// Simple Arabic greetings matcher
 function isGreeting(text = '') {
   const t = text.trim().toLowerCase();
   return (
@@ -127,7 +154,8 @@ function isGreeting(text = '') {
   );
 }
 
-// ====== Webhook Verify (GET) ======
+/* ------------------ WEBHOOKS ------------------ */
+// Verify (GET)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -140,7 +168,7 @@ app.get('/webhook', (req, res) => {
   return res.sendStatus(403);
 });
 
-// ====== Webhook Receiver (POST) ======
+// Receiver (POST)
 app.post('/webhook', async (req, res) => {
   try {
     const entry = req.body?.entry?.[0];
@@ -152,29 +180,25 @@ app.post('/webhook', async (req, res) => {
     }
 
     const msg = messages[0];
-    const from = msg.from; // customer phone
+    const from = msg.from;
     const type = msg.type;
 
     console.log('Incoming message:', JSON.stringify(msg, null, 2));
 
-    // 1) If text greeting -> welcome + button
     if (type === 'text') {
       const body = msg.text?.body || '';
       if (isGreeting(body)) {
         await sendWelcomeWithButton(from);
         return res.sendStatus(200);
       } else {
-        // Optional: fallback — also show button if you prefer
         await sendWelcomeWithButton(from);
         return res.sendStatus(200);
       }
     }
 
-    // 2) Interactive replies
     if (type === 'interactive') {
       const interactive = msg.interactive;
 
-      // 2.a) Button reply (SHOW_SERVICES)
       if (interactive?.type === 'button_reply') {
         const btnId = interactive.button_reply?.id;
         if (btnId === 'SHOW_SERVICES') {
@@ -183,7 +207,6 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      // 2.b) List reply (SERVICE_*)
       if (interactive?.type === 'list_reply') {
         const rowId = interactive.list_reply?.id;
         const chosenTitle =
@@ -196,7 +219,6 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    // Default fallback: show welcome + button
     await sendWelcomeWithButton(from);
     return res.sendStatus(200);
   } catch (e) {
@@ -205,9 +227,21 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Health check
+/* ------------------ HEALTH & DEBUG ------------------ */
 app.get('/', (_req, res) => res.send('Rider Mall WhatsApp bot is running.'));
 app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// Endpoint تشخيصي آمن: لا يطبع التوكن، فقط أطوال ومعلومات عامة
+app.get('/debug', (_req, res) => {
+  res.json({
+    token_length: TOKEN.length,
+    token_head: tokenHead,
+    token_tail: tokenTail,
+    phone_id_present: Boolean(PHONE_ID),
+    graph_url: GRAPH_URL.replace(PHONE_ID, '***'),
+    verify_token_length: VERIFY_TOKEN.length,
+  });
+});
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () =>
