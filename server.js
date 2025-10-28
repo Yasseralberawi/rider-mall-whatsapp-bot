@@ -1,14 +1,13 @@
-// server.js
+// server.js  (ESM version)
 // Rider Mall - WhatsApp Bot (Services focus)
 // Requires: WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, VERIFY_TOKEN
 
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
-const helmet = require('helmet');
-const morgan = require('morgan');
-
-require('dotenv').config();
+import express from 'express';
+import axios from 'axios';
+import cors from 'cors';
+import helmet from 'helmet';
+import morgan from 'morgan';
+import 'dotenv/config';
 
 const app = express();
 app.use(express.json());
@@ -121,9 +120,6 @@ function isGreeting(text = '') {
   const t = text.trim().toLowerCase();
   return (
     t.includes('مرحبا') ||
-    t.includes('مرحباا') ||
-    t.includes('مرحباّ') ||
-    t.includes('مرحبى') ||
     t.includes('السلام عليكم') ||
     t.includes('سلام عليكم') ||
     t === 'السلام' ||
