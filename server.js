@@ -1,5 +1,4 @@
-// server.js (ESM) — Rider Mall WhatsApp Bot: Services Flow + Strong Diagnostics
-// Env needed: WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, VERIFY_TOKEN
+// server.js (ESM) — Rider Mall WhatsApp Bot: Services Flow + Diagnostics (v24.0)
 
 import express from 'express';
 import axios from 'axios';
@@ -24,12 +23,11 @@ const PHONE_ID = (process.env.WHATSAPP_PHONE_ID || '').trim();
 process.env.WHATSAPP_TOKEN = cleanToken(process.env.WHATSAPP_TOKEN);
 const TOKEN = process.env.WHATSAPP_TOKEN || '';
 
-const GRAPH_VERSION = 'v20.0';
+const GRAPH_VERSION = 'v24.0';
 const GRAPH_URL = PHONE_ID
   ? `https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_ID}/messages`
-  : `https://graph.facebook.com/${GRAPH_VERSION}/messages`; // سيكشف الخطأ إن كان PHONE_ID مفقود
+  : `https://graph.facebook.com/${GRAPH_VERSION}/messages`;
 
-// اطبع معلومات تشخيصية (غير حساسة)
 const tokenHead = TOKEN.slice(0, 4);
 const tokenTail = TOKEN.slice(-4);
 console.log('DIAG: TOKEN length:', TOKEN.length, 'head:', tokenHead, 'tail:', tokenTail);
@@ -39,7 +37,6 @@ console.log('DIAG: VERIFY_TOKEN length:', VERIFY_TOKEN.length);
 
 /* ------------------ HELPERS ------------------ */
 async function sendWhatsApp(payload) {
-  // حواجز أمان: لا نرسل للـ Graph إذا البيئة ناقصة
   if (!TOKEN || TOKEN.length < 50) {
     console.error('ENV ERROR: WHATSAPP_TOKEN يبدو غير صالح (قصير/فارغ).');
     return;
@@ -124,16 +121,11 @@ function sendServiceList(to) {
 
 function serviceIdToTitle(id) {
   switch (id) {
-    case 'SERVICE_INSURANCE':
-      return 'خدمات التأمين';
-    case 'SERVICE_REGISTRATION':
-      return 'خدمات التسجيل';
-    case 'SERVICE_TRANSPORT':
-      return 'خدمات النقل';
-    case 'SERVICE_MAINTENANCE':
-      return 'خدمات الصيانة';
-    default:
-      return null;
+    case 'SERVICE_INSURANCE': return 'خدمات التأمين';
+    case 'SERVICE_REGISTRATION': return 'خدمات التسجيل';
+    case 'SERVICE_TRANSPORT':   return 'خدمات النقل';
+    case 'SERVICE_MAINTENANCE': return 'خدمات الصيانة';
+    default: return null;
   }
 }
 
@@ -159,7 +151,6 @@ app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
     console.log('Webhook verified');
     return res.status(200).send(challenge);
@@ -174,9 +165,7 @@ app.post('/webhook', async (req, res) => {
     const changes = entry?.changes?.[0];
     const messages = changes?.value?.messages;
 
-    if (!messages || messages.length === 0) {
-      return res.sendStatus(200);
-    }
+    if (!messages || messages.length === 0) return res.sendStatus(200);
 
     const msg = messages[0];
     const from = msg.from;
@@ -186,13 +175,8 @@ app.post('/webhook', async (req, res) => {
 
     if (type === 'text') {
       const body = msg.text?.body || '';
-      if (isGreeting(body)) {
-        await sendWelcomeWithButton(from);
-        return res.sendStatus(200);
-      } else {
-        await sendWelcomeWithButton(from);
-        return res.sendStatus(200);
-      }
+      await sendWelcomeWithButton(from);
+      return res.sendStatus(200);
     }
 
     if (type === 'interactive') {
@@ -208,9 +192,7 @@ app.post('/webhook', async (req, res) => {
 
       if (interactive?.type === 'list_reply') {
         const rowId = interactive.list_reply?.id;
-        const chosenTitle =
-          interactive.list_reply?.title || serviceIdToTitle(rowId);
-
+        const chosenTitle = interactive.list_reply?.title || serviceIdToTitle(rowId);
         if (rowId && chosenTitle) {
           await sendServiceConfirmation(from, chosenTitle);
           return res.sendStatus(200);
@@ -229,7 +211,6 @@ app.post('/webhook', async (req, res) => {
 /* ------------------ HEALTH & DEBUG ------------------ */
 app.get('/', (_req, res) => res.send('Rider Mall WhatsApp bot is running.'));
 app.get('/health', (_req, res) => res.json({ ok: true }));
-
 app.get('/debug', (_req, res) => {
   res.json({
     token_length: TOKEN.length,
@@ -243,6 +224,4 @@ app.get('/debug', (_req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () =>
-  console.log(`🚀 Server running on port ${PORT}`)
-);
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
