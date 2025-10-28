@@ -1,252 +1,219 @@
-import express from "express";
-import crypto from "crypto";
+// server.js
+// Rider Mall - WhatsApp Bot (Services focus)
+// Requires: WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, VERIFY_TOKEN
 
-// ==== ENV ====
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const WHATSAPP_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
 
-// ==== HELPERS ====
+require('dotenv').config();
+
 const app = express();
 app.use(express.json());
+app.use(cors());
+app.use(helmet());
+app.use(morgan('dev'));
 
-const graphBase = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
+// ====== ENV / Graph API Setup ======
+const TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_ID = process.env.WHATSAPP_PHONE_ID; // e.g. "1234567890"
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'rider-mall-verify';
+const GRAPH_URL = `https://graph.facebook.com/v20.0/${PHONE_ID}/messages`;
 
-async function sendRequest(body) {
-  const res = await fetch(graphBase, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    console.error("webhook error:", JSON.stringify(data, null, 2));
+// ====== Helpers ======
+async function sendWhatsApp(payload) {
+  try {
+    const { data } = await axios.post(GRAPH_URL, payload, {
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    return data;
+  } catch (err) {
+    console.error('WhatsApp API Error:', err?.response?.data || err.message);
   }
-  return data;
 }
 
-function isArabic(txt = "") {
-  return /[\u0600-\u06FF]/.test(txt);
-}
-
-function normalize(text = "") {
-  return text.trim().toLowerCase();
-}
-
-// ==== SENDERS ====
-async function sendText(to, text) {
-  return sendRequest({
-    messaging_product: "whatsapp",
+function sendText(to, text) {
+  return sendWhatsApp({
+    messaging_product: 'whatsapp',
     to,
-    type: "text",
-    text: { body: text }
+    type: 'text',
+    text: { body: text },
   });
 }
 
-async function sendMenu(to, lang = "en") {
-  // Interactive buttons (لا تحتاج قالب وتشتغل داخل نافذة 24 ساعة)
-  const title = lang === "ar" ? "قائمة رايدر مول" : "Rider Mall Menu";
-  const body  = lang === "ar"
-    ? "اختر خيارًا:"
-    : "Choose an option:";
-
-  return sendRequest({
-    messaging_product: "whatsapp",
+function sendWelcomeWithButton(to) {
+  const welcome =
+    'أهلاً وسهلاً بكم في رايدر مول - المنصة الشاملة لخدمات الدراجات في قطر.\nالرجاء اختيار الخدمة من القائمة.';
+  return sendWhatsApp({
+    messaging_product: 'whatsapp',
     to,
-    type: "interactive",
+    type: 'interactive',
     interactive: {
-      type: "button",
-      header: { type: "text", text: title },
-      body: { text: body },
+      type: 'button',
+      body: { text: welcome },
       action: {
         buttons: [
-          { type: "reply", reply: { id: "BTN_SERVICES", title: lang === "ar" ? "الخدمات" : "Services" } },
-          { type: "reply", reply: { id: "BTN_SHOP",     title: lang === "ar" ? "المتجر" : "Shop" } },
-          { type: "reply", reply: { id: "BTN_CONTACT",  title: lang === "ar" ? "تواصل" : "Contact" } }
-        ]
-      }
-    }
+          {
+            type: 'reply',
+            reply: { id: 'SHOW_SERVICES', title: 'عرض القائمة' },
+          },
+        ],
+      },
+    },
   });
 }
 
-async function sendServices(to, lang = "en") {
-  const text = lang === "ar"
-    ? `خدمات رايدر مول:
-• تسجيل المركبات
-• التأمين
-• سطحة ونقل
-• صيانة/إكسسوارات
-
-اكتب: 
-- "حجز" أو "booking" للحجز
-- "قائمة" لعرض القائمة`
-    : `Rider Mall Services:
-• Vehicle registration
-• Insurance
-• Recovery/Transport
-• Maintenance & accessories
-
-Type:
-- "booking" or "حجز" to book
-- "menu" to see the menu`;
-  return sendText(to, text);
-}
-
-async function sendShop(to, lang = "en") {
-  const text = lang === "ar"
-    ? `المتجر (Amazon Affiliates):
-• خوذات • قفازات • إكسسوارات
-نزّل منتجاتك وسأعطيك الرابط المختصر.
-
-اكتب "قائمة" للقائمة.`
-    : `Shop (Amazon Affiliates):
-• Helmets • Gloves • Accessories
-Share a product name and I'll reply with a short link.
-
-Type "menu" to see the menu.`;
-  return sendText(to, text);
-}
-
-async function sendContact(to, lang = "en") {
-  const text = lang === "ar"
-    ? `تواصل معنا:
-• واتساب: +974 7729 9005
-• الموقع: ridermall.qa (قريباً)
-
-اكتب "قائمة" لعرض القائمة.`
-    : `Contact us:
-• WhatsApp: +974 7729 9005
-• Website: ridermall.qa (soon)
-
-Type "menu" to see the menu.`;
-  return sendText(to, text);
-}
-
-async function sendBooking(to, lang = "en") {
-  // List message (interactive list)
-  const title = lang === "ar" ? "حجز خدمة" : "Book a service";
-  const body  = lang === "ar" ? "اختر الخدمة للحجز:" : "Choose a service to book:";
-  const collTitle = lang === "ar" ? "الخدمات المتاحة" : "Available services";
-
-  return sendRequest({
-    messaging_product: "whatsapp",
+function sendServiceList(to) {
+  return sendWhatsApp({
+    messaging_product: 'whatsapp',
     to,
-    type: "interactive",
+    type: 'interactive',
     interactive: {
-      type: "list",
-      header: { type: "text", text: title },
-      body: { text: body },
+      type: 'list',
+      header: { type: 'text', text: 'خدمات رايدر مول' },
+      body: { text: 'اختر الخدمة المطلوبة:' },
+      footer: { text: 'Rider Mall' },
       action: {
-        button: lang === "ar" ? "اختيار" : "Select",
+        button: 'اختر خدمة',
         sections: [
           {
-            title: collTitle,
+            title: 'الخدمات',
             rows: [
-              { id: "BOOK_REG",  title: lang === "ar" ? "تسجيل المركبات" : "Vehicle registration" },
-              { id: "BOOK_INS",  title: lang === "ar" ? "التأمين"       : "Insurance" },
-              { id: "BOOK_TOW",  title: lang === "ar" ? "سطحة/نقل"      : "Recovery/Transport" },
-              { id: "BOOK_MAINT",title: lang === "ar" ? "صيانة/إكسسوارات" : "Maintenance/Accessories" }
-            ]
-          }
-        ]
-      }
-    }
+              { id: 'SERVICE_INSURANCE', title: 'خدمات التأمين' },
+              { id: 'SERVICE_REGISTRATION', title: 'خدمات التسجيل' },
+              { id: 'SERVICE_TRANSPORT', title: 'خدمات النقل' },
+              { id: 'SERVICE_MAINTENANCE', title: 'خدمات الصيانة' },
+            ],
+          },
+        ],
+      },
+    },
   });
 }
 
-// ==== ROUTES ====
-// Health
-app.get("/", (_req, res) => res.status(200).send("OK"));
+function serviceIdToTitle(id) {
+  switch (id) {
+    case 'SERVICE_INSURANCE':
+      return 'خدمات التأمين';
+    case 'SERVICE_REGISTRATION':
+      return 'خدمات التسجيل';
+    case 'SERVICE_TRANSPORT':
+      return 'خدمات النقل';
+    case 'SERVICE_MAINTENANCE':
+      return 'خدمات الصيانة';
+    default:
+      return null;
+  }
+}
 
-// Verify webhook
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+function sendServiceConfirmation(to, serviceTitle) {
+  const msg = `تم تأكيد خدمة (${serviceTitle})، سيقوم فريق رايدر مول بالتواصل معك.\nسعدنا بخدمتك.`;
+  return sendText(to, msg);
+}
+
+// Simple Arabic greetings matcher
+function isGreeting(text = '') {
+  const t = text.trim().toLowerCase();
+  return (
+    t.includes('مرحبا') ||
+    t.includes('مرحباا') ||
+    t.includes('مرحباّ') ||
+    t.includes('مرحبى') ||
+    t.includes('السلام عليكم') ||
+    t.includes('سلام عليكم') ||
+    t === 'السلام' ||
+    t === 'سلام'
+  );
+}
+
+// ====== Webhook Verify (GET) ======
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('Webhook verified');
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
 });
 
-// Receive messages
-app.post("/webhook", async (req, res) => {
+// ====== Webhook Receiver (POST) ======
+app.post('/webhook', async (req, res) => {
   try {
     const entry = req.body?.entry?.[0];
-    const change = entry?.changes?.[0];
-    const msg = change?.value?.messages?.[0];
-    const from = msg?.from; // رقم المرسل (بدون +)
-    let lang = "en";
+    const changes = entry?.changes?.[0];
+    const messages = changes?.value?.messages;
 
-    if (msg) {
-      // Text message
-      if (msg.type === "text") {
-        const userText = msg.text?.body || "";
-        console.log("Incoming message:", { from, text: userText });
+    if (!messages || messages.length === 0) {
+      return res.sendStatus(200);
+    }
 
-        lang = isArabic(userText) ? "ar" : "en";
-        const t = normalize(userText);
+    const msg = messages[0];
+    const from = msg.from; // customer phone
+    const type = msg.type;
 
-        // Keywords
-        if (["menu", "help", "start", "قائمة", "ابدأ", "مساعدة"].includes(t)) {
-          await sendMenu(from, lang);
-        } else if (["services", "service", "خدمات", "الخدمات"].includes(t)) {
-          await sendServices(from, lang);
-        } else if (["shop", "store", "المتجر", "شراء"].includes(t)) {
-          await sendShop(from, lang);
-        } else if (["contact", "support", "تواصل", "اتصال"].includes(t)) {
-          await sendContact(from, lang);
-        } else if (["booking", "book", "حجز"].includes(t)) {
-          await sendBooking(from, lang);
-        } else if (["hi", "hello", "مرحبا", "سلام"].includes(t)) {
-          await sendText(from, lang === "ar"
-            ? "أهلاً! اكتب \"قائمة\" لعرض الأزرار."
-            : "Hello! Type \"menu\" to see options.");
-        } else {
-          // Fallback
-          await sendText(from, lang === "ar"
-            ? `ما فهمت رسالتك. اكتب "قائمة" لعرض الأزرار.`
-            : `I didn't catch that. Type "menu" to see options.`);
+    console.log('Incoming message:', JSON.stringify(msg, null, 2));
+
+    // 1) If text greeting -> welcome + button
+    if (type === 'text') {
+      const body = msg.text?.body || '';
+      if (isGreeting(body)) {
+        await sendWelcomeWithButton(from);
+        return res.sendStatus(200);
+      } else {
+        // Optional: fallback — also show button if you prefer
+        await sendWelcomeWithButton(from);
+        return res.sendStatus(200);
+      }
+    }
+
+    // 2) Interactive replies
+    if (type === 'interactive') {
+      const interactive = msg.interactive;
+
+      // 2.a) Button reply (SHOW_SERVICES)
+      if (interactive?.type === 'button_reply') {
+        const btnId = interactive.button_reply?.id;
+        if (btnId === 'SHOW_SERVICES') {
+          await sendServiceList(from);
+          return res.sendStatus(200);
         }
       }
 
-      // Button replies
-      if (msg.type === "interactive" && msg.interactive?.button_reply) {
-        const id = msg.interactive.button_reply.id;
-        lang = "en"; // الرسائل التفاعلية غالباً بالإنجليزي، نقدر نعدل حسب آخر رسالة
+      // 2.b) List reply (SERVICE_*)
+      if (interactive?.type === 'list_reply') {
+        const rowId = interactive.list_reply?.id;
+        const chosenTitle =
+          interactive.list_reply?.title || serviceIdToTitle(rowId);
 
-        if (id === "BTN_SERVICES")      await sendServices(from, lang);
-        else if (id === "BTN_SHOP")     await sendShop(from, lang);
-        else if (id === "BTN_CONTACT")  await sendContact(from, lang);
-        else                            await sendMenu(from, lang);
-      }
-
-      // List selections
-      if (msg.type === "interactive" && msg.interactive?.list_reply) {
-        const id = msg.interactive.list_reply.id;
-        lang = "en";
-        const confirm = (title) => lang === "ar"
-          ? `تم استلام طلب حجز: ${title}. سنعاود الاتصال بك قريبًا.`
-          : `Booking received: ${title}. We'll contact you shortly.`;
-
-        switch (id) {
-          case "BOOK_REG":   await sendText(from, confirm(lang === "ar" ? "تسجيل المركبات" : "Vehicle registration")); break;
-          case "BOOK_INS":   await sendText(from, confirm(lang === "ar" ? "التأمين" : "Insurance")); break;
-          case "BOOK_TOW":   await sendText(from, confirm(lang === "ar" ? "سطحة/نقل" : "Recovery/Transport")); break;
-          case "BOOK_MAINT": await sendText(from, confirm(lang === "ar" ? "صيانة/إكسسوارات" : "Maintenance/Accessories")); break;
-          default:           await sendMenu(from, lang);
+        if (rowId && chosenTitle) {
+          await sendServiceConfirmation(from, chosenTitle);
+          return res.sendStatus(200);
         }
       }
     }
-  } catch (err) {
-    console.error("handler error:", err);
+
+    // Default fallback: show welcome + button
+    await sendWelcomeWithButton(from);
+    return res.sendStatus(200);
+  } catch (e) {
+    console.error('Webhook handler error:', e);
+    return res.sendStatus(200);
   }
-  res.sendStatus(200);
 });
 
-// ==== START ====
+// Health check
+app.get('/', (_req, res) => res.send('Rider Mall WhatsApp bot is running.'));
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () =>
+  console.log(`🚀 Server running on port ${PORT}`)
+);
