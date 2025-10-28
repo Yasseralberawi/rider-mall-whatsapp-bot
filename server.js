@@ -1,90 +1,88 @@
-// server.js (تشخيص مبسط)
 import express from "express";
-import fetch from "node-fetch";
+import cors from "cors";
+import helmet from "helmet";
+import morgan from "morgan";
+import axios from "axios";
 
+// ====== ENV ======
+const PORT = process.env.PORT || 10000;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN; // rider-mall-verify-2025
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID; // 855895520937481
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN; // من Quickstart
+// WABA_ID اختياري في هذا الكود
+
+// ====== APP ======
 const app = express();
 app.use(express.json());
+app.use(cors());
+app.use(helmet());
+app.use(morgan("dev"));
 
-// اقرأ المتغيّرات
-const TOKEN   = process.env.WHATSAPP_ACCESS_TOKEN;
-const PHONEID = process.env.PHONE_NUMBER_ID;
-
-// اطبع حالة المتغيّرات عند الإقلاع
-console.log("[ENV CHECK]", {
-  hasToken: !!TOKEN,
-  tokenLen: TOKEN ? TOKEN.length : 0,
-  hasPhoneId: !!PHONEID,
-  phoneId: PHONEID || null,
-});
-
-// health بسيط
+// Health check
 app.get("/", (_req, res) => res.status(200).send("OK"));
 
-app.get("/debug/env", (_req, res) => {
-  res.json({
-    hasToken: !!TOKEN,
-    tokenLen: TOKEN ? TOKEN.length : 0,
-    hasPhoneId: !!PHONEID,
-    phoneId: PHONEID || null,
-  });
-});
-
-// verify webhook
+// Verify webhook (GET)
 app.get("/webhook", (req, res) => {
-  const verifyToken = process.env.VERIFY_TOKEN || "rider-mall-verify-2025";
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === verifyToken) {
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
 });
 
-// receive & reply
+// Receive messages (POST)
 app.post("/webhook", async (req, res) => {
   try {
-    // مهم: ردّ 200 بسرعة
-    res.sendStatus(200);
+    // WhatsApp sends an array of entry/changes
+    const entry = req.body?.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+    const message = value?.messages?.[0];
 
-    const entry = req.body.entry?.[0];
-    const change = entry?.changes?.[0];
-    const message = change?.value?.messages?.[0];
-    const from = message?.from;
-    const text = message?.text?.body;
+    const from = message?.from; // رقم المرسل بصيغة دولية
+    const text = message?.text?.body; // محتوى النص
 
-    if (!from || !text) return;
+    if (from && text) {
+      console.log("Incoming message:", { from, text });
 
-    if (!TOKEN || !PHONEID) {
-      console.log("WhatsApp credentials missing. Skipping send.");
-      return;
+      if (!WHATSAPP_ACCESS_TOKEN || !PHONE_NUMBER_ID) {
+        console.log("WhatsApp credentials missing. Skipping send.");
+      } else {
+        // رد بسيط (echo)
+        await axios.post(
+          `https://graph.facebook.com/v24.0/${PHONE_NUMBER_ID}/messages`,
+          {
+            messaging_product: "whatsapp",
+            to: from,
+            type: "text",
+            text: { body: `Echo: ${text}` }
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+      }
     }
 
-    const reply = `Echo: ${text}`;
-    const url = `https://graph.facebook.com/v24.0/${PHONEID}/messages`;
-
-    const payload = {
-      messaging_product: "whatsapp",
-      to: from, // مع الرمز الدولي كما يصل من واتساب
-      type: "text",
-      text: { body: reply }
-    };
-
-    const r = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const data = await r.json();
-    console.log("[WA SEND]", r.status, JSON.stringify(data));
-  } catch (e) {
-    console.error("Webhook error:", e);
+    // WhatsApp expects 200 even لو ما رددنا
+    res.sendStatus(200);
+  } catch (err) {
+    console.error(
+      "webhook error:",
+      err?.response?.data || err?.message || err
+    );
+    // دائمًا رجّع 200
+    res.sendStatus(200);
   }
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+// ====== START ======
+app.listen(PORT, "0.0.0.0", () =>
+  console.log(`🚀 Server running on port ${PORT}`)
+);
