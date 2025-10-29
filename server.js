@@ -1,4 +1,4 @@
-// server.js (ESM) — Rider Mall WhatsApp Bot: خطوة 3 (ترحيب + زر الخدمات + قائمة الخدمات + خيارات التأمين)
+// server.js (ESM) — Rider Mall WhatsApp Bot: خطوة 4 (Fix list + fallback buttons)
 import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
@@ -12,6 +12,7 @@ const FALLBACK_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = 'rider_mall';
 const COLLECTION = 'servicerequests';
+const API_VERSION = 'v24.0'; // تحديث نسخة الـ Graph API
 
 /* ========= اتصال Mongo ========= */
 let mongoClient;
@@ -114,7 +115,7 @@ function normalize(s='') {
 async function handleSelection(phoneNumberId, wa, id) {
   const { state } = getState(wa);
 
-  // 1) زر "عرض الخدمات" -> نرسل قائمة الخدمات
+  // 1) زر "عرض الخدمات" -> نرسل قائمة الخدمات (مع fallback)
   if (id === 'BTN_SHOW_SERVICES') {
     await sendServicesList(phoneNumberId, wa);
     setState(wa, 'AWAIT_SERVICE_PICK');
@@ -141,7 +142,6 @@ async function handleSelection(phoneNumberId, wa, id) {
 
   // 3) خيارات التأمين
   if (id === 'INS_COMP') {
-    // مؤقتًا رد بسيط — سنضيف الحساب والتأكيد بالخطوة القادمة
     await sendText(phoneNumberId, wa, 'تم اختيار: تأمين شامل. الرجاء الانتظار، سنطلب قيمة الدراجة في الخطوة القادمة ✅');
     setState(wa, 'INS_COMP_WAIT_VALUE'); // سنفعّل استقبال القيمة لاحقًا
     return;
@@ -179,89 +179,138 @@ async function saveServiceRequest(waNumber, service) {
 
 /* ========= إرسال رسائل واتساب ========= */
 async function sendText(phoneNumberId, to, body) {
-  await axios.post(
-    `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
-    { messaging_product: 'whatsapp', to, text: { body } },
-    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
-  );
+  try {
+    await axios.post(
+      `https://graph.facebook.com/${API_VERSION}/${phoneNumberId}/messages`,
+      { messaging_product: 'whatsapp', to, text: { body } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (e) {
+    console.error('WA sendText error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
+  }
 }
 
 // ترحيب + زر الخدمات
 async function sendWelcomeAndServicesButton(phoneNumberId, to) {
   const welcome =
     'أهلاً وسهلاً بكم في رايدر مول – المنصة الشاملة لخدمات الدراجات في قطر.\nالرجاء اختيار الخدمة من القائمة.';
-  await axios.post(
-    `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
-    {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'interactive',
-      interactive: {
-        type: 'button',
-        body: { text: welcome },
-        action: {
-          buttons: [
-            { type: 'reply', reply: { id: 'BTN_SHOW_SERVICES', title: 'عرض الخدمات' } }
-          ]
+  try {
+    await axios.post(
+      `https://graph.facebook.com/${API_VERSION}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'button',
+          body: { text: welcome },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'BTN_SHOW_SERVICES', title: 'عرض الخدمات' } }
+            ]
+          }
         }
-      }
-    },
-    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
-  );
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (e) {
+    console.error('WA welcome button error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
+  }
 }
 
-// قائمة الخدمات (List)
+// قائمة الخدمات (List) + Fallback للأزرار إذا فشلت
 async function sendServicesList(phoneNumberId, to) {
-  await axios.post(
-    `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
-    {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'interactive',
-      interactive: {
-        type: 'list',
-        body: { text: 'اختر خدمة من القائمة 👇' },
-        action: {
-          button: 'الخدمات',
-          sections: [
-            {
-              title: 'خدمات Rider Mall',
-              rows: [
-                { id: 'SRV_INSURANCE',   title: 'خدمات التأمين' },
-                { id: 'SRV_REGISTRATION',title: 'خدمات تجديد الترخيص وفاحص' },
-                { id: 'SRV_ROADSIDE',    title: 'خدمات المساعدة على الطريق' },
-                { id: 'SRV_MAINTENANCE', title: 'خدمات الصيانة' }
-              ]
-            }
-          ]
+  try {
+    await axios.post(
+      `https://graph.facebook.com/${API_VERSION}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'list',
+          body: { text: 'اختر خدمة من القائمة 👇' },
+          action: {
+            button: 'الخدمات',
+            sections: [
+              {
+                title: 'خدمات Rider Mall',
+                rows: [
+                  { id: 'SRV_INSURANCE',   title: 'خدمات التأمين' },
+                  { id: 'SRV_REGISTRATION',title: 'خدمات تجديد الترخيص وفاحص' },
+                  { id: 'SRV_ROADSIDE',    title: 'خدمات المساعدة على الطريق' },
+                  { id: 'SRV_MAINTENANCE', title: 'خدمات الصيانة' }
+                ]
+              }
+            ]
+          }
         }
-      }
-    },
-    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
-  );
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (e) {
+    console.error('WA list error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
+    // Fallback تلقائي: أزرار (3) + رسالة للصيانة
+    await sendServicesButtonsFallback(phoneNumberId, to);
+  }
+}
+
+// fallback: أزرار بدل اللست
+async function sendServicesButtonsFallback(phoneNumberId, to) {
+  try {
+    // أزرار 3 خدمات
+    await axios.post(
+      `https://graph.facebook.com/${API_VERSION}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'button',
+          body: { text: 'اختر خدمة من الأزرار التالية:' },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'SRV_INSURANCE',    title: 'التأمين' } },
+              { type: 'reply', reply: { id: 'SRV_REGISTRATION', title: 'التجديد وفاحص' } },
+              { type: 'reply', reply: { id: 'SRV_ROADSIDE',     title: 'مساعدة الطريق' } }
+            ]
+          }
+        }
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+    // تنبيه لخيار الصيانة بنص
+    await sendText(phoneNumberId, to, 'لخدمة الصيانة: اكتب كلمة "صيانة" أو اخترها من القائمة لاحقًا.');
+  } catch (e) {
+    console.error('WA fallback buttons error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
+  }
 }
 
 // خيارات التأمين (شامل / ضد الغير)
 async function sendInsuranceOptions(phoneNumberId, to) {
-  await axios.post(
-    `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
-    {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'interactive',
-      interactive: {
-        type: 'button',
-        body: { text: 'تم اختيار خدمات التأمين، يرجى الاختيار:' },
-        action: {
-          buttons: [
-            { type: 'reply', reply: { id: 'INS_COMP', title: 'تأمين شامل (4%)' } },
-            { type: 'reply', reply: { id: 'INS_TPL',  title: 'تأمين ضد الغير (400 ر.ق)' } }
-          ]
+  try {
+    await axios.post(
+      `https://graph.facebook.com/${API_VERSION}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'button',
+          body: { text: 'تم اختيار خدمات التأمين، يرجى الاختيار:' },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'INS_COMP', title: 'تأمين شامل (4%)' } },
+              { type: 'reply', reply: { id: 'INS_TPL',  title: 'تأمين ضد الغير (400 ر.ق)' } }
+            ]
+          }
         }
-      }
-    },
-    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
-  );
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (e) {
+    console.error('WA insurance options error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
+  }
 }
 
 /* ========= تشغيل السيرفر ========= */
