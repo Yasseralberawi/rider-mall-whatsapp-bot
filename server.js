@@ -86,7 +86,7 @@ app.post('/webhook', async (req, res) => {
     if (type === 'image') {
       const mediaId = msg.image?.id;
 
-      // Insurance comprehensive docs
+      // Insurance comprehensive docs (step-by-step)
       if (current.state === 'INS_COMP_AWAIT_DOCS') {
         await handleInsuranceDocsImage(phoneNumberId, from, mediaId);
         return;
@@ -104,6 +104,17 @@ app.post('/webhook', async (req, res) => {
     if (type === 'text') text = msg.text?.body || '';
     const norm = normalize(text);
 
+    // === GUARD: if waiting insurance docs and user sent text, do NOT greet — just re-prompt ===
+    if (current.state === 'INS_COMP_AWAIT_DOCS') {
+      const docs = current.context.docs || [];
+      if (docs.length === 0) {
+        await sendText(phoneNumberId, from, 'الرجاء إرسال **صورة استمارة الدراجة**.');
+      } else if (docs.length === 1) {
+        await sendText(phoneNumberId, from, 'الرجاء إرسال **صورة الإقامة القطرية للمالك**.');
+      }
+      return;
+    }
+
     // Insurance comprehensive — expecting bike value
     if (current.state === 'INS_COMP_WAIT_VALUE') {
       const num = parseArabicNumber(norm);
@@ -120,7 +131,7 @@ app.post('/webhook', async (req, res) => {
     // Insurance comprehensive — after quote: allow text choices, too
     if (current.state === 'INS_COMP_QUOTE_SENT') {
       if (['موافق','ok','yes','y'].includes(norm)) {
-        await startInsuranceDocsFlow(phoneNumberId, from);
+        await startInsuranceDocsFlow(phoneNumberId, from); // will ask for form image ONLY
         return;
       }
       if (norm.includes('غير') || norm.includes('no') || norm === 'x') {
@@ -258,7 +269,7 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
 
   // After quote: buttons
   if (normalizedId === 'INS_AGREE') {
-    await startInsuranceDocsFlow(phoneNumberId, wa);
+    await startInsuranceDocsFlow(phoneNumberId, wa); // سيطلب "صورة الاستمارة" فقط
     return;
   }
   if (normalizedId === 'INS_DISAGREE') {
@@ -315,15 +326,18 @@ async function sendInsuranceComprehensiveQuote(phoneNumberId, to, premium) {
     'اختر أحد الخيارات:'
   );
 }
+
+// ✅ بعد الموافقة على السعر: نطلب "صورة استمارة الدراجة" فقط
 async function startInsuranceDocsFlow(phoneNumberId, to) {
   setState(to, 'INS_COMP_AWAIT_DOCS', { docs: [] });
   await sendText(
     phoneNumberId,
     to,
-    'الرجاء إرسال **صورتين**:\n1) استمارة الدراجة\n2) الإقامة القطرية للمالك'
+    'الرجاء إرسال **صورة استمارة الدراجة**.'
   );
 }
-// ===== INSURANCE DOCS FLOW (Step-by-step) =====
+
+// ===== INSURANCE DOCS FLOW (Step-by-step)
 async function handleInsuranceDocsImage(phoneNumberId, wa, mediaId) {
   const st = getState(wa);
   const ctx = st.context || {};
@@ -364,7 +378,7 @@ async function handleInsuranceDocsImage(phoneNumberId, wa, mediaId) {
     await sendText(
       phoneNumberId,
       wa,
-      '✅ تم استلام جميع الصور بنجاح.\nشكرًا لاختياركم **خدمات التأمين من رايدر مول**.\nسيتم التواصل معكم من فريق رايدر مول في أقرب وقت ممكن.'
+      '✅ تم استلام جميع الصور بنجاح.\nشكرًا لاختياركم **خدمات التأمين من رايدر مول**.\nسيتم التواصل معكم من ضمن فريق رايدر مول في أقرب وقت ممكن.'
     );
     return;
   }
@@ -630,4 +644,3 @@ async function sendInsuranceOptions(phoneNumberId, to) {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
-
