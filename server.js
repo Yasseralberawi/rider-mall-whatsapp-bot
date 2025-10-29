@@ -323,33 +323,56 @@ async function startInsuranceDocsFlow(phoneNumberId, to) {
     'الرجاء إرسال **صورتين**:\n1) استمارة الدراجة\n2) الإقامة القطرية للمالك'
   );
 }
+// ===== INSURANCE DOCS FLOW (Step-by-step) =====
 async function handleInsuranceDocsImage(phoneNumberId, wa, mediaId) {
   const st = getState(wa);
-  const docs = st.context.docs || [];
-  if (mediaId) docs.push({ type: 'image', mediaId });
+  const ctx = st.context || {};
+  const docs = ctx.docs || [];
 
-  if (docs.length < 2) {
-    setState(wa, 'INS_COMP_AWAIT_DOCS', { docs });
-    await sendText(phoneNumberId, wa, `تم استلام الصورة ${docs.length} ✅ — يرجى إرسال الصورة ${docs.length + 1}.`);
+  if (!mediaId) {
+    await sendText(phoneNumberId, wa, '⚠️ لم أستقبل الصورة، يرجى المحاولة مرة أخرى.');
     return;
   }
 
-  const { bikeValue, premium } = st.context;
-  setState(wa, 'DONE', { docs });
-  await saveServiceRequest(wa, {
-    id: 'SRV_INSURANCE_COMP',
-    label: 'تأمين شامل',
-    bikeValue,
-    premium,
-    attachments: docs
-  });
+  // الصورة الأولى = استمارة الدراجة
+  if (docs.length === 0) {
+    docs.push({ type: 'image', mediaId, label: 'استمارة الدراجة' });
+    setState(wa, 'INS_COMP_AWAIT_DOCS', { docs });
+    await sendText(
+      phoneNumberId,
+      wa,
+      '✅ تم استلام **صورة استمارة الدراجة**.\nالرجاء الآن إرسال **صورة الإقامة القطرية للمالك**.'
+    );
+    return;
+  }
 
-  await sendText(
-    phoneNumberId,
-    wa,
-    'شكرًا لاختياركم خدمات التأمين من رايدر مول.\nسيتواصل معكم فريقنا في أقرب وقت ممكن ✅'
-  );
+  // الصورة الثانية = الإقامة القطرية
+  if (docs.length === 1) {
+    docs.push({ type: 'image', mediaId, label: 'الإقامة القطرية للمالك' });
+
+    const { bikeValue, premium } = ctx;
+    setState(wa, 'DONE', { docs });
+
+    await saveServiceRequest(wa, {
+      id: 'SRV_INSURANCE_COMP',
+      label: 'تأمين شامل',
+      bikeValue,
+      premium,
+      attachments: docs,
+    });
+
+    await sendText(
+      phoneNumberId,
+      wa,
+      '✅ تم استلام جميع الصور بنجاح.\nشكرًا لاختياركم **خدمات التأمين من رايدر مول**.\nسيتم التواصل معكم من فريق رايدر مول في أقرب وقت ممكن.'
+    );
+    return;
+  }
+
+  // أكثر من صورتين → تجاهل الباقي
+  await sendText(phoneNumberId, wa, '✅ تم استلام الصور المطلوبة، لا حاجة لإرسال المزيد.');
 }
+
 async function confirmTPL(phoneNumberId, wa) {
   await sendText(phoneNumberId, wa, 'شكراً لاختيارك **التأمين ضد الغير** بتكلفة **400 ريال قطري** ✅');
   await saveServiceRequest(wa, { id: 'SRV_INSURANCE_TPL', label: 'تأمين ضد الغير', price: 400 });
@@ -607,3 +630,4 @@ async function sendInsuranceOptions(phoneNumberId, to) {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
