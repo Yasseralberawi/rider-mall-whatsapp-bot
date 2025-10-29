@@ -1,11 +1,11 @@
 // server.js (ESM) — Rider Mall WhatsApp Bot
-// خطوة 7: تأمين شامل كامل (قيمة -> 4% -> موافق/غير/ضد الغير -> صور -> شكر + حفظ)
+// v2025-10-29 — Insurance (COMP/TPL) + Registration & Fahes + robust list/buttons
 import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
 import { MongoClient } from 'mongodb';
 
-/* ========= الإعدادات ========= */
+/* ========= SETTINGS ========= */
 const PORT = process.env.PORT || 10000;
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || process.env.VERIFY_TOKEN || 'dev-token';
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
@@ -13,9 +13,9 @@ const FALLBACK_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = 'rider_mall';
 const COLLECTION = 'servicerequests';
-const API_VERSION = 'v24.0'; // حسب تحذير Meta
+const API_VERSION = 'v24.0'; // per Meta notice
 
-/* ========= اتصال Mongo ========= */
+/* ========= MONGO ========= */
 let mongoClient;
 async function getCollection() {
   if (!mongoClient) {
@@ -26,7 +26,7 @@ async function getCollection() {
   return mongoClient.db(DB_NAME).collection(COLLECTION);
 }
 
-/* ========= جلسات مبسطة ========= */
+/* ========= SESSIONS (in-memory) ========= */
 const sessions = new Map(); // key: waNumber -> { state, context }
 function setState(wa, state, context = {}) {
   sessions.set(wa, { state, context: { ...(sessions.get(wa)?.context || {}), ...context } });
@@ -35,14 +35,14 @@ function getState(wa) {
   return sessions.get(wa) || { state: 'IDLE', context: {} };
 }
 
-/* ========= Express ========= */
+/* ========= EXPRESS ========= */
 const app = express();
 app.use(express.json());
 app.use(morgan('dev'));
 
 app.get('/', (_req, res) => res.status(200).send('OK'));
 
-/* Verify Webhook */
+/* ===== VERIFY WEBHOOK ===== */
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -55,7 +55,7 @@ app.get('/webhook', (req, res) => {
   return res.sendStatus(403);
 });
 
-/* Receive Webhook */
+/* ===== RECEIVE WEBHOOK ===== */
 app.post('/webhook', async (req, res) => {
   console.log('Incoming webhook:', JSON.stringify(req.body));
   res.sendStatus(200);
@@ -73,7 +73,7 @@ app.post('/webhook', async (req, res) => {
     const type = msg.type;
     const current = getState(from);
 
-    // 1) تفاعلي (أزرار/قائمة)
+    /* ===== interactive replies ===== */
     if (type === 'interactive') {
       const btn = msg.interactive?.button_reply;
       const lst = msg.interactive?.list_reply;
@@ -82,19 +82,29 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // 2) صور أثناء طلب المستندات للتأمين الشامل
-    if (type === 'image' && current.state === 'INS_COMP_AWAIT_DOCS') {
+    /* ===== images (docs upload) ===== */
+    if (type === 'image') {
       const mediaId = msg.image?.id;
-      await handleInsuranceDocsImage(phoneNumberId, from, mediaId);
-      return;
+
+      // Insurance comprehensive docs
+      if (current.state === 'INS_COMP_AWAIT_DOCS') {
+        await handleInsuranceDocsImage(phoneNumberId, from, mediaId);
+        return;
+      }
+
+      // Registration & Fahes docs
+      if (current.state === 'REG_AWAIT_DOCS') {
+        await handleRegistrationDocsImage(phoneNumberId, from, mediaId);
+        return;
+      }
     }
 
-    // 3) نصوص عامة أو ضمن حالة التأمين الشامل
+    /* ===== text ===== */
     let text = '';
     if (type === 'text') text = msg.text?.body || '';
     const norm = normalize(text);
 
-    // استقبال قيمة الدراجة أثناء الشامل
+    // Insurance comprehensive — expecting bike value
     if (current.state === 'INS_COMP_WAIT_VALUE') {
       const num = parseArabicNumber(norm);
       if (Number.isFinite(num) && num > 0) {
@@ -107,7 +117,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // تحكم في الردود على الموافقة/عدم الموافقة/تحويل ضد الغير بالنص أيضًا
+    // Insurance comprehensive — after quote: allow text choices, too
     if (current.state === 'INS_COMP_QUOTE_SENT') {
       if (['موافق','ok','yes','y'].includes(norm)) {
         await startInsuranceDocsFlow(phoneNumberId, from);
@@ -123,7 +133,32 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    // كلمات بدء المحادثة
+    // Registration & Fahes — after cost confirm
+    if (current.state === 'REG_COST_CONFIRM') {
+      if (['موافق','ok','yes','y'].includes(norm)) {
+        await sendRegistrationSlotChoice(phoneNumberId, from);
+        setState(from, 'REG_SLOT_PICK');
+        return;
+      }
+      if (norm.includes('غير') || norm.includes('no') || norm === 'x') {
+        await backToMainMenu(phoneNumberId, from);
+        return;
+      }
+    }
+
+    // Registration & Fahes — slot pick by text
+    if (current.state === 'REG_SLOT_PICK') {
+      if (norm.includes('صباح') || norm.includes('am') || norm.includes('sabah')) {
+        await finalizeRegistration(phoneNumberId, from, 'صباحي');
+        return;
+      }
+      if (norm.includes('مساء') || norm.includes('pm') || norm.includes('masai')) {
+        await finalizeRegistration(phoneNumberId, from, 'مسائي');
+        return;
+      }
+    }
+
+    // greetings
     const greetings = ['مرحبا','السلام عليكم','السلام','هاي','hi','hello','start','ابدا','ابدأ','قائمة','menu','help'];
     if (greetings.some(g => norm.includes(g))) {
       await sendWelcomeAndServicesButton(phoneNumberId, from);
@@ -131,7 +166,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // أي شيء آخر -> إعادة ترحيب
+    // default: send welcome again
     await sendText(phoneNumberId, from, 'أهلاً بك في Rider Mall 👋');
     await sendWelcomeAndServicesButton(phoneNumberId, from);
     setState(from, 'AWAIT_SERVICES_BUTTON');
@@ -140,14 +175,14 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-/* ========= المنطق ========= */
+/* ========= HELPERS ========= */
 function normalize(s='') {
   return s.trim()
-    .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))) // أرقام عربية -> إنجليزية
+    .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))) // Arabic digits -> English
     .toLowerCase()
     .replace(/[آأإ]/g,'ا')
     .replace(/[ة]/g,'ه')
-    .replace(/[^\u0600-\u06FFa-z0-9\s.]/g,''); // نسمح بنقطة للارقام العشرية
+    .replace(/[^\u0600-\u06FFa-z0-9\s.]/g,''); // keep dot
 }
 function parseArabicNumber(s='') {
   const digits = s.replace(/[^0-9.]/g,'');
@@ -155,20 +190,21 @@ function parseArabicNumber(s='') {
   return Number.isFinite(n) ? n : NaN;
 }
 
+/* ========= FLOW HANDLER ========= */
 async function handleSelection(phoneNumberId, wa, idRaw) {
   const { state } = getState(wa);
   const id = (idRaw || '').trim();
   const normalizedId = id.toUpperCase();
   console.log('➡️ User selected option ID:', id, 'Current state:', state);
 
-  // زر "عرض الخدمات" -> قائمة (مع fallback)
+  // Show services list
   if (id === 'BTN_SHOW_SERVICES') {
     await sendServicesList(phoneNumberId, wa);
     setState(wa, 'AWAIT_SERVICE_PICK');
     return;
   }
 
-  // خدمات رئيسية
+  // Main services
   if (
     normalizedId.includes('SRV_INSURANCE') ||
     normalizedId.includes('INSURANCE') ||
@@ -179,37 +215,38 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
     setState(wa, 'AWAIT_INSURANCE_TYPE');
     return;
   }
+
   if (
     normalizedId.includes('SRV_REGISTRATION') ||
     normalizedId.includes('REGISTRATION') ||
     normalizedId.includes('تجديد')
   ) {
-    await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة تجديد الترخيص وفاحص ✅');
-    setState(wa, 'SRV_REGISTRATION_INFO');
+    await startRegistrationDocsFlow(phoneNumberId, wa); // يبدأ طلب الصور
     return;
   }
+
   if (
     normalizedId.includes('SRV_ROADSIDE') ||
     normalizedId.includes('ROADSIDE') ||
     normalizedId.includes('مساعد')
   ) {
-    await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة المساعدة على الطريق ✅');
+    await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة المساعدة على الطريق ✅ (سنفعّل السيناريو التفصيلي لاحقًا)');
     setState(wa, 'SRV_ROADSIDE_INFO');
     return;
   }
+
   if (
     normalizedId.includes('SRV_MAINTENANCE') ||
     normalizedId.includes('MAINTENANCE') ||
     normalizedId.includes('صيانة')
   ) {
-    await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة الصيانة ✅');
+    await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة الصيانة ✅ (يتم تفعيلها لاحقًا)');
     setState(wa, 'SRV_MAINTENANCE_INFO');
     return;
   }
 
-  // خيارات التأمين
+  // Insurance options
   if (normalizedId.includes('INS_COMP')) {
-    // تأمين شامل -> اطلب قيمة الدراجة
     setState(wa, 'INS_COMP_WAIT_VALUE', { bikeValue: null, premium: null, docs: [] });
     await sendText(phoneNumberId, wa, 'الرجاء إرسال **قيمة الدراجة بالأرقام فقط** (مثال: 80000).');
     return;
@@ -219,7 +256,7 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
     return;
   }
 
-  // أزرار الموافقة بعد عرض السعر
+  // After quote: buttons
   if (normalizedId === 'INS_AGREE') {
     await startInsuranceDocsFlow(phoneNumberId, wa);
     return;
@@ -233,22 +270,40 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
     return;
   }
 
-  // غير معروف
+  // Registration cost confirm buttons
+  if (normalizedId === 'REG_AGREE') {
+    await sendRegistrationSlotChoice(phoneNumberId, wa);
+    setState(wa, 'REG_SLOT_PICK');
+    return;
+  }
+  if (normalizedId === 'REG_DISAGREE') {
+    await backToMainMenu(phoneNumberId, wa);
+    return;
+  }
+
+  // Registration slot buttons
+  if (normalizedId === 'REG_SLOT_AM') {
+    await finalizeRegistration(phoneNumberId, wa, 'صباحي');
+    return;
+  }
+  if (normalizedId === 'REG_SLOT_PM') {
+    await finalizeRegistration(phoneNumberId, wa, 'مسائي');
+    return;
+  }
+
+  // Unknown
   await sendText(phoneNumberId, wa, 'خيار غير معروف. الرجاء اختيار الخدمة من القائمة:');
   await sendServicesList(phoneNumberId, wa);
   setState(wa, 'AWAIT_SERVICE_PICK');
 }
 
-/* ====== مسارات فرعية للتأمين ====== */
-
-// عرض السعر والأزرار بعد إدخال قيمة الدراجة
+/* ===== INSURANCE (COMPREHENSIVE) ===== */
 async function sendInsuranceComprehensiveQuote(phoneNumberId, to, premium) {
   await sendText(
     phoneNumberId,
     to,
     `تكلفة التأمين ${premium} ريال قطري.\nيرجى الاختيار:`
   );
-  // أزرار: موافق / غير موافق / ضد الغير
   await sendButtons(
     phoneNumberId,
     to,
@@ -260,8 +315,6 @@ async function sendInsuranceComprehensiveQuote(phoneNumberId, to, premium) {
     'اختر أحد الخيارات:'
   );
 }
-
-// بدء طلب المستندات (صورتين)
 async function startInsuranceDocsFlow(phoneNumberId, to) {
   setState(to, 'INS_COMP_AWAIT_DOCS', { docs: [] });
   await sendText(
@@ -270,8 +323,6 @@ async function startInsuranceDocsFlow(phoneNumberId, to) {
     'الرجاء إرسال **صورتين**:\n1) استمارة الدراجة\n2) الإقامة القطرية للمالك'
   );
 }
-
-// استقبال صورة أثناء طلب المستندات
 async function handleInsuranceDocsImage(phoneNumberId, wa, mediaId) {
   const st = getState(wa);
   const docs = st.context.docs || [];
@@ -283,7 +334,6 @@ async function handleInsuranceDocsImage(phoneNumberId, wa, mediaId) {
     return;
   }
 
-  // اكتملت الصور
   const { bikeValue, premium } = st.context;
   setState(wa, 'DONE', { docs });
   await saveServiceRequest(wa, {
@@ -300,22 +350,82 @@ async function handleInsuranceDocsImage(phoneNumberId, wa, mediaId) {
     'شكرًا لاختياركم خدمات التأمين من رايدر مول.\nسيتواصل معكم فريقنا في أقرب وقت ممكن ✅'
   );
 }
-
-// تأكيد التأمين ضد الغير
 async function confirmTPL(phoneNumberId, wa) {
   await sendText(phoneNumberId, wa, 'شكراً لاختيارك **التأمين ضد الغير** بتكلفة **400 ريال قطري** ✅');
   await saveServiceRequest(wa, { id: 'SRV_INSURANCE_TPL', label: 'تأمين ضد الغير', price: 400 });
   setState(wa, 'DONE');
 }
 
-// رجوع للقائمة الرئيسية
+/* ===== REGISTRATION & FAHES ===== */
+async function startRegistrationDocsFlow(phoneNumberId, wa) {
+  setState(wa, 'REG_AWAIT_DOCS', { docs: [] });
+  await sendText(
+    phoneNumberId,
+    wa,
+    'شكراً لاختياركم **تجديد الترخيص وفاحص**.\nالرجاء إرسال **صورتين**:\n1) استمارة الدراجة\n2) الإقامة القطرية للمالك'
+  );
+}
+async function handleRegistrationDocsImage(phoneNumberId, wa, mediaId) {
+  const st = getState(wa);
+  const docs = st.context.docs || [];
+  if (mediaId) docs.push({ type: 'image', mediaId });
+
+  if (docs.length < 2) {
+    setState(wa, 'REG_AWAIT_DOCS', { docs });
+    await sendText(phoneNumberId, wa, `تم استلام الصورة ${docs.length} ✅ — يرجى إرسال الصورة ${docs.length + 1}.`);
+    return;
+  }
+
+  // Got both images → ask cost confirm (200 QAR)
+  setState(wa, 'REG_COST_CONFIRM', { docs });
+  await sendButtons(
+    phoneNumberId,
+    wa,
+    [
+      { id: 'REG_AGREE',    title: 'موافق' },
+      { id: 'REG_DISAGREE', title: 'غير موافق' }
+    ],
+    'الرجاء تأكيد تكلفة النقل **200 ريال قطري**:'
+  );
+}
+async function sendRegistrationSlotChoice(phoneNumberId, wa) {
+  await sendButtons(
+    phoneNumberId,
+    wa,
+    [
+      { id: 'REG_SLOT_AM', title: 'صباحي' },
+      { id: 'REG_SLOT_PM', title: 'مسائي' }
+    ],
+    'اختر الموعد المناسب:'
+  );
+}
+async function finalizeRegistration(phoneNumberId, wa, slot) {
+  const st = getState(wa);
+  const docs = st.context.docs || [];
+  await saveServiceRequest(wa, {
+    id: 'SRV_REGISTRATION',
+    label: 'تجديد الترخيص وفاحص',
+    price: 200,
+    preferredSlot: slot,
+    attachments: docs
+  });
+
+  await sendText(
+    phoneNumberId,
+    wa,
+    `شكرًا لاختياركم خدمات **تجديد الترخيص وفاحص**.\nتم تسجيل موعدك (${slot}) ✅\nسيتواصل معك فريق رايدر مول قريبًا.`
+  );
+  setState(wa, 'DONE');
+}
+
+/* ===== COMMON ACTIONS ===== */
 async function backToMainMenu(phoneNumberId, wa) {
   await sendText(phoneNumberId, wa, 'تم إلغاء الطلب. بإمكانك اختيار خدمة جديدة من القائمة:');
   await sendWelcomeAndServicesButton(phoneNumberId, wa);
   setState(wa, 'AWAIT_SERVICES_BUTTON', { bikeValue: null, premium: null, docs: [] });
 }
 
-/* ========= حفظ الطلبات ========= */
+/* ===== PERSISTENCE ===== */
 async function saveServiceRequest(waNumber, service) {
   try {
     const col = await getCollection();
@@ -326,6 +436,7 @@ async function saveServiceRequest(waNumber, service) {
       bikeValue: service.bikeValue ?? null,
       premium: service.premium ?? null,
       price: service.price ?? null,
+      preferredSlot: service.preferredSlot ?? null,
       attachments: service.attachments ?? [],
       status: 'new',
       createdAt: new Date()
@@ -337,7 +448,7 @@ async function saveServiceRequest(waNumber, service) {
   }
 }
 
-/* ========= إرسال رسائل ========= */
+/* ===== SENDING HELPERS ===== */
 async function sendText(phoneNumberId, to, body) {
   try {
     await axios.post(
@@ -373,7 +484,7 @@ async function sendButtons(phoneNumberId, to, buttonsArr, bodyText) {
   }
 }
 
-/* ترحيب + زر “عرض الخدمات” */
+/* ===== WELCOME + SERVICES ===== */
 async function sendWelcomeAndServicesButton(phoneNumberId, to) {
   const welcome =
     'أهلاً وسهلاً بكم في رايدر مول – المنصة الشاملة لخدمات الدراجات في قطر.\nالرجاء اختيار الخدمة من القائمة.';
@@ -401,7 +512,7 @@ async function sendWelcomeAndServicesButton(phoneNumberId, to) {
   }
 }
 
-/* قائمة الخدمات (list) — عناوين قصيرة (≤ 24) + Fallback */
+/* list (<=24 chars per row) + fallback */
 async function sendServicesList(phoneNumberId, to) {
   try {
     await axios.post(
@@ -437,7 +548,6 @@ async function sendServicesList(phoneNumberId, to) {
   }
 }
 
-/* Fallback: أزرار قصيرة العناوين (≤ 20) */
 async function sendServicesButtonsFallback(phoneNumberId, to) {
   try {
     await axios.post(
@@ -466,7 +576,7 @@ async function sendServicesButtonsFallback(phoneNumberId, to) {
   }
 }
 
-/* خيارات التأمين — عناوين ≤ 20 */
+/* ===== INSURANCE OPTIONS (<=20 chars) ===== */
 async function sendInsuranceOptions(phoneNumberId, to) {
   try {
     await axios.post(
@@ -493,7 +603,7 @@ async function sendInsuranceOptions(phoneNumberId, to) {
   }
 }
 
-/* ========= تشغيل ========= */
+/* ===== START SERVER ===== */
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
