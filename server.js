@@ -1,5 +1,5 @@
 // server.js (ESM) — Rider Mall WhatsApp Bot
-// v2025-10-29 — Insurance (COMP/TPL) + Registration & Fahes + robust list/buttons
+// v2025-10-29 — Insurance (COMP/TPL) + Registration & Fahes (step-by-step) + robust list/buttons
 import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
@@ -92,7 +92,7 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // Registration & Fahes docs
+      // Registration & Fahes docs (step-by-step)
       if (current.state === 'REG_AWAIT_DOCS') {
         await handleRegistrationDocsImage(phoneNumberId, from, mediaId);
         return;
@@ -104,8 +104,19 @@ app.post('/webhook', async (req, res) => {
     if (type === 'text') text = msg.text?.body || '';
     const norm = normalize(text);
 
-    // === GUARD: if waiting insurance docs and user sent text, do NOT greet — just re-prompt ===
+    // === GUARD: if waiting INSURANCE docs and user sent text, do NOT greet — just re-prompt ===
     if (current.state === 'INS_COMP_AWAIT_DOCS') {
+      const docs = current.context.docs || [];
+      if (docs.length === 0) {
+        await sendText(phoneNumberId, from, 'الرجاء إرسال **صورة استمارة الدراجة**.');
+      } else if (docs.length === 1) {
+        await sendText(phoneNumberId, from, 'الرجاء إرسال **صورة الإقامة القطرية للمالك**.');
+      }
+      return;
+    }
+
+    // === GUARD: if waiting REGISTRATION docs and user sent text, re-prompt step-by-step ===
+    if (current.state === 'REG_AWAIT_DOCS') {
       const docs = current.context.docs || [];
       if (docs.length === 0) {
         await sendText(phoneNumberId, from, 'الرجاء إرسال **صورة استمارة الدراجة**.');
@@ -144,7 +155,7 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    // Registration & Fahes — after cost confirm
+    // Registration & Fahes — after cost confirm (text path)
     if (current.state === 'REG_COST_CONFIRM') {
       if (['موافق','ok','yes','y'].includes(norm)) {
         await sendRegistrationSlotChoice(phoneNumberId, from);
@@ -232,7 +243,7 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
     normalizedId.includes('REGISTRATION') ||
     normalizedId.includes('تجديد')
   ) {
-    await startRegistrationDocsFlow(phoneNumberId, wa); // يبدأ طلب الصور
+    await startRegistrationDocsFlow(phoneNumberId, wa); // يبدأ طلب الصور خطوة بخطوة
     return;
   }
 
@@ -393,38 +404,60 @@ async function confirmTPL(phoneNumberId, wa) {
   setState(wa, 'DONE');
 }
 
-/* ===== REGISTRATION & FAHES ===== */
+/* ===== REGISTRATION & FAHES (Step-by-step) ===== */
 async function startRegistrationDocsFlow(phoneNumberId, wa) {
   setState(wa, 'REG_AWAIT_DOCS', { docs: [] });
   await sendText(
     phoneNumberId,
     wa,
-    'شكراً لاختياركم **تجديد الترخيص وفاحص**.\nالرجاء إرسال **صورتين**:\n1) استمارة الدراجة\n2) الإقامة القطرية للمالك'
+    'الرجاء إرسال **صورة استمارة الدراجة**.'
   );
 }
+
 async function handleRegistrationDocsImage(phoneNumberId, wa, mediaId) {
   const st = getState(wa);
-  const docs = st.context.docs || [];
-  if (mediaId) docs.push({ type: 'image', mediaId });
+  const ctx = st.context || {};
+  const docs = ctx.docs || [];
 
-  if (docs.length < 2) {
-    setState(wa, 'REG_AWAIT_DOCS', { docs });
-    await sendText(phoneNumberId, wa, `تم استلام الصورة ${docs.length} ✅ — يرجى إرسال الصورة ${docs.length + 1}.`);
+  if (!mediaId) {
+    await sendText(phoneNumberId, wa, '⚠️ لم أستقبل الصورة، يرجى المحاولة مرة أخرى.');
     return;
   }
 
-  // Got both images → ask cost confirm (200 QAR)
-  setState(wa, 'REG_COST_CONFIRM', { docs });
-  await sendButtons(
-    phoneNumberId,
-    wa,
-    [
-      { id: 'REG_AGREE',    title: 'موافق' },
-      { id: 'REG_DISAGREE', title: 'غير موافق' }
-    ],
-    'الرجاء تأكيد تكلفة النقل **200 ريال قطري**:'
-  );
+  // الصورة الأولى = استمارة الدراجة
+  if (docs.length === 0) {
+    docs.push({ type: 'image', mediaId, label: 'استمارة الدراجة' });
+    setState(wa, 'REG_AWAIT_DOCS', { docs });
+    await sendText(
+      phoneNumberId,
+      wa,
+      '✅ تم استلام **صورة استمارة الدراجة**.\nالرجاء الآن إرسال **صورة الإقامة القطرية للمالك**.'
+    );
+    return;
+  }
+
+  // الصورة الثانية = الإقامة القطرية
+  if (docs.length === 1) {
+    docs.push({ type: 'image', mediaId, label: 'الإقامة القطرية للمالك' });
+
+    // بعد اكتمال الصورتين → نطلب تأكيد تكلفة النقل 200 ر.ق
+    setState(wa, 'REG_COST_CONFIRM', { docs });
+    await sendButtons(
+      phoneNumberId,
+      wa,
+      [
+        { id: 'REG_AGREE',    title: 'موافق' },
+        { id: 'REG_DISAGREE', title: 'غير موافق' }
+      ],
+      'الرجاء تأكيد تكلفة النقل **200 ريال قطري**:'
+    );
+    return;
+  }
+
+  // أكثر من صورتين → تجاهل الباقي
+  await sendText(phoneNumberId, wa, '✅ تم استلام الصور المطلوبة، لا حاجة لإرسال المزيد.');
 }
+
 async function sendRegistrationSlotChoice(phoneNumberId, wa) {
   await sendButtons(
     phoneNumberId,
@@ -433,9 +466,10 @@ async function sendRegistrationSlotChoice(phoneNumberId, wa) {
       { id: 'REG_SLOT_AM', title: 'صباحي' },
       { id: 'REG_SLOT_PM', title: 'مسائي' }
     ],
-    'اختر الموعد المناسب:'
+    'شكراً للموافقة. الرجاء اختيار الموعد المناسب:'
   );
 }
+
 async function finalizeRegistration(phoneNumberId, wa, slot) {
   const st = getState(wa);
   const docs = st.context.docs || [];
@@ -450,7 +484,7 @@ async function finalizeRegistration(phoneNumberId, wa, slot) {
   await sendText(
     phoneNumberId,
     wa,
-    `شكرًا لاختياركم خدمات **تجديد الترخيص وفاحص**.\nتم تسجيل موعدك (${slot}) ✅\nسيتواصل معك فريق رايدر مول قريبًا.`
+    `شكراً لاختياركم **خدمات تجديد الترخيص وفاحص**.\nتم تسجيل موعدك (${slot}) ✅\nسيتم التواصل معكم من ضمن فريق عمل رايدر مول في أقرب وقت ممكن.`
   );
   setState(wa, 'DONE');
 }
