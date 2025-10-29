@@ -1,6 +1,6 @@
 // server.js (ESM) — Rider Mall WhatsApp Bot
 // v2025-10-29
-// Insurance (COMP/TPL) + Registration & Fahes (step-by-step) + Roadside Assistance (step-by-step)
+// Features: Insurance (COMP/TPL) + Registration & Fahes + Roadside + Admin Dashboard (/admin)
 import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
@@ -14,7 +14,8 @@ const FALLBACK_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = 'rider_mall';
 const COLLECTION = 'servicerequests';
-const API_VERSION = 'v24.0'; // per Meta notice
+const API_VERSION = 'v24.0'; // Meta auto-upgrade notice
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY || ''; // <-- NEW
 
 /* ========= MONGO ========= */
 let mongoClient;
@@ -38,7 +39,7 @@ function getState(wa) {
 
 /* ========= EXPRESS ========= */
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 app.use(morgan('dev'));
 
 app.get('/', (_req, res) => res.status(200).send('OK'));
@@ -229,11 +230,11 @@ app.post('/webhook', async (req, res) => {
 /* ========= HELPERS ========= */
 function normalize(s='') {
   return s.trim()
-    .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))) // Arabic digits -> English
+    .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
     .toLowerCase()
     .replace(/[آأإ]/g,'ا')
     .replace(/[ة]/g,'ه')
-    .replace(/[^\u0600-\u06FFa-z0-9\s.]/g,''); // keep dot
+    .replace(/[^\u0600-\u06FFa-z0-9\s.]/g,'');
 }
 function parseArabicNumber(s='') {
   const digits = s.replace(/[^0-9.]/g,'');
@@ -272,7 +273,7 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
     normalizedId.includes('REGISTRATION') ||
     normalizedId.includes('تجديد')
   ) {
-    await startRegistrationDocsFlow(phoneNumberId, wa); // يبدأ طلب الصور خطوة بخطوة
+    await startRegistrationDocsFlow(phoneNumberId, wa);
     return;
   }
 
@@ -309,7 +310,7 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
 
   // After quote: buttons
   if (normalizedId === 'INS_AGREE') {
-    await startInsuranceDocsFlow(phoneNumberId, wa); // سيطلب "صورة الاستمارة" فقط
+    await startInsuranceDocsFlow(phoneNumberId, wa);
     return;
   }
   if (normalizedId === 'INS_DISAGREE') {
@@ -343,7 +344,6 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
   }
 
   /* ===== ROADSIDE ===== */
-  // Pick type
   if (normalizedId === 'RD_EMERGENCY') {
     await finalizeRoadsideEmergency(phoneNumberId, wa);
     return;
@@ -353,8 +353,6 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
     setState(wa, 'RD_BOOKING_SLOT');
     return;
   }
-
-  // Slot for roadside
   if (normalizedId === 'RD_SLOT_AM') {
     setState(wa, 'RD_COST_CONFIRM', { preferredSlot: 'صباحي' });
     await sendRoadsideCostConfirm(phoneNumberId, wa);
@@ -365,8 +363,6 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
     await sendRoadsideCostConfirm(phoneNumberId, wa);
     return;
   }
-
-  // Cost confirm roadside
   if (normalizedId === 'RD_AGREE') {
     const { preferredSlot } = getState(wa).context || {};
     await finalizeRoadsideBooking(phoneNumberId, wa, preferredSlot || null);
@@ -385,11 +381,7 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
 
 /* ===== INSURANCE (COMPREHENSIVE) ===== */
 async function sendInsuranceComprehensiveQuote(phoneNumberId, to, premium) {
-  await sendText(
-    phoneNumberId,
-    to,
-    `تكلفة التأمين ${premium} ريال قطري.\nيرجى الاختيار:`
-  );
+  await sendText(phoneNumberId, to, `تكلفة التأمين ${premium} ريال قطري.\nيرجى الاختيار:`);
   await sendButtons(
     phoneNumberId,
     to,
@@ -766,6 +758,225 @@ async function sendInsuranceOptions(phoneNumberId, to) {
     console.error('WA insurance options error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
   }
 }
+
+/* ===================== ADMIN (NEW) ===================== */
+function adminAuth(req, res, next) {
+  try {
+    const headerKey = req.get('x-admin-key') || '';
+    const queryKey = req.query.key || '';
+    if (!ADMIN_API_KEY) return res.status(500).send('ADMIN_API_KEY not set.');
+    if (headerKey === ADMIN_API_KEY || queryKey === ADMIN_API_KEY) return next();
+    return res.status(401).send('Unauthorized');
+  } catch {
+    return res.status(401).send('Unauthorized');
+  }
+}
+
+// API: list requests (with simple filters & pagination)
+app.get('/api/admin/requests', adminAuth, async (req, res) => {
+  try {
+    const col = await getCollection();
+    const { serviceId, status, limit = '100', page = '1', q = '' } = req.query;
+    const lim = Math.min(parseInt(limit, 10) || 100, 500);
+    const skip = (Math.max(parseInt(page, 10) || 1, 1) - 1) * lim;
+
+    const filter = {};
+    if (serviceId) filter.serviceId = String(serviceId);
+    if (status) filter.status = String(status);
+    if (q) {
+      filter.$or = [
+        { waNumber: { $regex: String(q), $options: 'i' } },
+        { serviceLabel: { $regex: String(q), $options: 'i' } }
+      ];
+    }
+
+    const total = await col.countDocuments(filter);
+    const items = await col
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(lim)
+      .toArray();
+
+    res.json({ ok: true, total, page: Number(page), limit: lim, items });
+  } catch (e) {
+    console.error('Admin list error:', e);
+    res.status(500).json({ ok: false, error: 'Admin list failed' });
+  }
+});
+
+// API: quick stats
+app.get('/api/admin/stats', adminAuth, async (_req, res) => {
+  try {
+    const col = await getCollection();
+    const byService = await col.aggregate([
+      { $group: { _id: '$serviceId', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]).toArray();
+    const total = await col.countDocuments();
+    res.json({ ok: true, total, byService });
+  } catch (e) {
+    console.error('Admin stats error:', e);
+    res.status(500).json({ ok: false, error: 'Admin stats failed' });
+  }
+});
+
+// Minimal admin page
+app.get('/admin', async (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rider Mall — Admin</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Tahoma, Arial; background:#0b0b0b; color:#fff; margin:0; }
+  header { background:#000; padding:16px 20px; border-bottom:1px solid #111; display:flex; gap:12px; align-items:center; }
+  .brand{ font-weight:700; color:#FFB800; }
+  .card { background:#111; border:1px solid #1f1f1f; border-radius:14px; padding:16px; margin:16px; }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; }
+  input, select, button{ padding:10px 12px; border-radius:10px; border:1px solid #222; background:#0f0f0f; color:#fff; }
+  button{ cursor:pointer; background:#FFB800; color:#000; border:none; font-weight:700; }
+  table{ width:100%; border-collapse:collapse; margin-top:12px; }
+  th, td{ border-bottom:1px solid #222; padding:10px; font-size:14px; vertical-align:top; }
+  th{ text-align:right; color:#aaa; }
+  .badge{ background:#1a1a1a; border:1px solid #2a2a2a; padding:2px 8px; border-radius:999px; font-size:12px; }
+  .muted{ color:#aaa; }
+  .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">Rider Mall Admin</div>
+    <div class="muted">لوحة عرض الطلبات</div>
+  </header>
+
+  <div class="card">
+    <div class="controls">
+      <input id="key" type="password" placeholder="أدخل ADMIN_API_KEY" />
+      <input id="q" type="search" placeholder="بحث برقم واتساب أو الخدمة" />
+      <select id="service">
+        <option value="">كل الخدمات</option>
+        <option value="SRV_INSURANCE_COMP">تأمين شامل</option>
+        <option value="SRV_INSURANCE_TPL">تأمين ضد الغير</option>
+        <option value="SRV_REGISTRATION">التجديد وفاحص</option>
+        <option value="SRV_ROADSIDE_EMERGENCY">مساعدة الطريق - طارئة</option>
+        <option value="SRV_ROADSIDE_BOOKING">مساعدة الطريق - حجز</option>
+      </select>
+      <button id="load">تحميل</button>
+      <button id="auto">تشغيل/إيقاف التحديث كل 30ث</button>
+    </div>
+    <div class="muted" style="margin-top:8px">نصيحة: بعد إدخال المفتاح، سيتم حفظه محليًا في المتصفح.</div>
+    <div id="stats" style="margin-top:12px"></div>
+    <div id="table"></div>
+  </div>
+
+<script>
+  const elKey = document.getElementById('key');
+  const elQ = document.getElementById('q');
+  const elService = document.getElementById('service');
+  const elLoad = document.getElementById('load');
+  const elAuto = document.getElementById('auto');
+  const elTable = document.getElementById('table');
+  const elStats = document.getElementById('stats');
+
+  // persist key
+  const savedKey = localStorage.getItem('rm_admin_key') || '';
+  if (savedKey) elKey.value = savedKey;
+
+  let timer = null;
+
+  function htmlEscape(s=''){return s.replace(/[&<>"]/g,c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));}
+
+  async function fetchJSON(url){
+    const key = elKey.value.trim();
+    if(!key){ alert('أدخل ADMIN_API_KEY'); throw new Error('no key'); }
+    localStorage.setItem('rm_admin_key', key);
+    const u = new URL(url, window.location.origin);
+    u.searchParams.set('limit','100');
+    const res = await fetch(u.toString(), { headers: { 'x-admin-key': key }});
+    if(!res.ok){
+      const txt = await res.text();
+      throw new Error('HTTP '+res.status+': '+txt);
+    }
+    return res.json();
+  }
+
+  async function load() {
+    const q = elQ.value.trim();
+    const serviceId = elService.value.trim();
+    const url = new URL('/api/admin/requests', window.location.origin);
+    if (q) url.searchParams.set('q', q);
+    if (serviceId) url.searchParams.set('serviceId', serviceId);
+
+    elTable.innerHTML = '<div class="muted">...جاري التحميل</div>';
+    try{
+      const data = await fetchJSON(url.toString());
+      renderTable(data.items || []);
+      await loadStats();
+    }catch(e){
+      elTable.innerHTML = '<div style="color:#f66">خطأ: '+htmlEscape(e.message)+'</div>';
+    }
+  }
+
+  async function loadStats(){
+    try{
+      const data = await fetchJSON('/api/admin/stats');
+      const rows = (data.byService||[]).map(r=>\`<span class="badge">\${htmlEscape(r._id||'غير محدد')}: \${r.count}</span>\`).join(' ');
+      elStats.innerHTML = \`<div class="muted">إجمالي الطلبات: \${data.total}</div><div style="margin-top:6px">\${rows}</div>\`;
+    }catch(e){
+      elStats.innerHTML = '';
+    }
+  }
+
+  function renderTable(items){
+    if(!items.length){ elTable.innerHTML = '<div class="muted">لا توجد طلبات.</div>'; return; }
+    const rows = items.map(it=>{
+      const atts = (it.attachments||[]).map(a=>\`<div class="mono">\${htmlEscape(a.label||a.type||'ملف')}: \${htmlEscape(a.mediaId||'')}</div>\`).join('');
+      return \`
+        <tr>
+          <td class="mono">\${htmlEscape(new Date(it.createdAt).toLocaleString())}</td>
+          <td class="mono">\${htmlEscape(it.waNumber||'')}</td>
+          <td>\${htmlEscape(it.serviceLabel||it.serviceId||'')}</td>
+          <td>
+            <div>السعر: \${it.price ?? '-'} | قيمة الدراجة: \${it.bikeValue ?? '-'}</div>
+            <div>القسط: \${it.premium ?? '-'}</div>
+            <div>الموعد المفضل: \${htmlEscape(it.preferredSlot||'-')}</div>
+          </td>
+          <td>\${atts||'-'}</td>
+          <td><span class="badge">\${htmlEscape(it.status||'new')}</span></td>
+        </tr>\`;
+    }).join('');
+    elTable.innerHTML = \`
+      <table>
+        <thead>
+          <tr>
+            <th>التاريخ</th>
+            <th>واتساب</th>
+            <th>الخدمة</th>
+            <th>تفاصيل</th>
+            <th>مرفقات</th>
+            <th>الحالة</th>
+          </tr>
+        </thead>
+        <tbody>\${rows}</tbody>
+      </table>\`;
+  }
+
+  elLoad.addEventListener('click', load);
+  elAuto.addEventListener('click', ()=>{
+    if(timer){ clearInterval(timer); timer=null; elAuto.textContent='تشغيل/إيقاف التحديث كل 30ث'; return; }
+    timer = setInterval(load, 30000);
+    elAuto.textContent='(يعمل) إيقاف التحديث';
+  });
+
+  // auto initial load
+  load();
+</script>
+</body>
+</html>`);
+});
 
 /* ===== START SERVER ===== */
 app.listen(PORT, '0.0.0.0', () => {
