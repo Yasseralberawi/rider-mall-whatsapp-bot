@@ -1,5 +1,5 @@
 // server.js (ESM) — Rider Mall WhatsApp Bot + Admin Dashboard
-// v2025-10-29 (statuses + CSV + status filter)
+// v2025-10-29-b (thumbnails + download + statuses + CSV + filter)
 import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
@@ -709,7 +709,37 @@ app.get('/api/admin/export', adminAuth, async (req, res) => {
   }
 });
 
-// Admin Page (updated UI)
+/* ==== MEDIA PROXY (WhatsApp) ==== */
+// 1) GET media info to fetch URL  2) GET the file stream and pipe to client
+app.get('/api/admin/media/:mediaId', adminAuth, async (req, res) => {
+  const { mediaId } = req.params;
+  try {
+    // Step 1: get media URL
+    const meta = await axios.get(
+      `https://graph.facebook.com/${API_VERSION}/${mediaId}`,
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+    const mediaUrl = meta.data?.url;
+    if (!mediaUrl) return res.status(404).send('No media url');
+
+    // Step 2: fetch the binary with auth and stream
+    const fileRes = await axios.get(mediaUrl, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+      responseType: 'stream'
+    });
+
+    // Pass through headers (basic)
+    if (fileRes.headers['content-type']) res.setHeader('Content-Type', fileRes.headers['content-type']);
+    if (fileRes.headers['content-length']) res.setHeader('Content-Length', fileRes.headers['content-length']);
+
+    fileRes.data.pipe(res);
+  } catch (e) {
+    console.error('Media proxy error:', e?.response?.data || e.message);
+    res.status(500).send('Media fetch failed');
+  }
+});
+
+// Admin Page (updated UI with thumbnails)
 app.get('/admin', async (_req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`<!doctype html>
@@ -730,6 +760,9 @@ app.get('/admin', async (_req, res) => {
   .badge{background:#1a1a1a;border:1px solid #2a2a2a;padding:2px 8px;border-radius:999px;font-size:12px}
   .muted{color:#aaa}.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
   .row-actions{display:flex;gap:6px;align-items:center}
+  .thumb{width:92px;height:92px;object-fit:cover;border-radius:10px;border:1px solid #222;display:block}
+  .att{display:flex;gap:8px;align-items:center;margin-bottom:6px}
+  .att a{color:#FFB800;text-decoration:none}
 </style>
 </head>
 <body>
@@ -784,6 +817,12 @@ app.get('/admin', async (_req, res) => {
     if(!res.ok){ throw new Error('HTTP '+res.status+': '+(await res.text())); }
     return res.json();
   }
+  function mediaUrl(id){
+    const key=elKey.value.trim();
+    const u=new URL('/api/admin/media/'+id, window.location.origin);
+    u.searchParams.set('key', key);
+    return u.toString();
+  }
 
   async function load(){
     const q=elQ.value.trim(); const serviceId=elService.value.trim(); const status=elStatus.value.trim();
@@ -814,10 +853,23 @@ app.get('/admin', async (_req, res) => {
     return \`<select class="stSel">\${options}</select>\`;
   }
 
+  function renderAtt(att){
+    if(!att.mediaId) return '-';
+    const url=mediaUrl(att.mediaId);
+    return \`
+      <div class="att">
+        <img class="thumb" src="\${url}" alt="\${esc(att.label||'image')}" />
+        <div>
+          <div class="mono">\${esc(att.label||'ملف')}</div>
+          <a href="\${url}" target="_blank" download>تنزيل</a>
+        </div>
+      </div>\`;
+  }
+
   function renderTable(items){
     if(!items.length){ elTable.innerHTML='<div class="muted">لا توجد طلبات.</div>'; return; }
     const rows=items.map(it=>{
-      const atts=(it.attachments||[]).map(a=>\`<div class="mono">\${esc(a.label||a.type||'ملف')}: \${esc(a.mediaId||'')}</div>\`).join('');
+      const atts=(it.attachments||[]).map(renderAtt).join('');
       return \`
         <tr data-id="\${esc(it._id)}">
           <td class="mono">\${esc(new Date(it.createdAt).toLocaleString())}</td>
@@ -865,8 +917,7 @@ app.get('/admin', async (_req, res) => {
     if(q) url.searchParams.set('q', q);
     if(serviceId) url.searchParams.set('serviceId', serviceId);
     if(status) url.searchParams.set('status', status);
-    // open in new tab with query key to pass auth
-    url.searchParams.set('key', key);
+    url.searchParams.set('key', key); // للسماح بالتنزيل في تبويب جديد
     window.open(url.toString(), '_blank');
   });
 
