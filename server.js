@@ -1,4 +1,4 @@
-// server.js (ESM) — Rider Mall WhatsApp Bot: خطوة 4 (Fix list + fallback buttons)
+// server.js (ESM) — Rider Mall WhatsApp Bot: ترحيب + زر الخدمات + قائمة/أزرار الخدمات + إصلاح اختيار "التأمين"
 import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
@@ -12,7 +12,7 @@ const FALLBACK_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = 'rider_mall';
 const COLLECTION = 'servicerequests';
-const API_VERSION = 'v24.0'; // تحديث نسخة الـ Graph API
+const API_VERSION = 'v24.0'; // أحدث نسخة حسب تحذير Meta
 
 /* ========= اتصال Mongo ========= */
 let mongoClient;
@@ -111,9 +111,10 @@ function normalize(s='') {
     .replace(/[^\u0600-\u06FFa-z0-9\s]/g,'');
 }
 
-// التعامل مع اختيارات الأزرار والقوائم
+// ✅ إصلاح شامل للتعرف على الاختيارات حتى لو تغيّر الـ id من واتساب
 async function handleSelection(phoneNumberId, wa, id) {
   const { state } = getState(wa);
+  console.log('➡️ User selected option ID:', id, 'Current state:', state);
 
   // 1) زر "عرض الخدمات" -> نرسل قائمة الخدمات (مع fallback)
   if (id === 'BTN_SHOW_SERVICES') {
@@ -122,38 +123,65 @@ async function handleSelection(phoneNumberId, wa, id) {
     return;
   }
 
-  // 2) اختيار خدمة من القائمة
-  if (id === 'SRV_INSURANCE' || id === 'SRV_REGISTRATION' || id === 'SRV_ROADSIDE' || id === 'SRV_MAINTENANCE') {
-    if (id === 'SRV_INSURANCE') {
-      await sendInsuranceOptions(phoneNumberId, wa); // يرسل زرين: شامل / ضد الغير
-      setState(wa, 'AWAIT_INSURANCE_TYPE');
-    } else if (id === 'SRV_REGISTRATION') {
-      await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة تجديد الترخيص وفاحص. (سيتم تفعيل الخطوات التفصيلية في الخطوة القادمة) ✅');
-      setState(wa, 'SRV_REGISTRATION_INFO');
-    } else if (id === 'SRV_ROADSIDE') {
-      await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة المساعدة على الطريق. (سيتم تفعيل السيناريو التفصيلي لاحقًا) ✅');
-      setState(wa, 'SRV_ROADSIDE_INFO');
-    } else if (id === 'SRV_MAINTENANCE') {
-      await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة الصيانة. (سيتم تفعيل السيناريو التفصيلي لاحقًا) ✅');
-      setState(wa, 'SRV_MAINTENANCE_INFO');
-    }
+  // تطبيع id لالتقاط كلمات عربية/إنجليزية
+  const normalizedId = (id || '').trim().toUpperCase();
+
+  // 2) اختيار خدمة
+  if (
+    normalizedId.includes('SRV_INSURANCE') ||
+    normalizedId.includes('INSURANCE') ||
+    normalizedId.includes('تأمين') ||
+    normalizedId.includes('التأمين')
+  ) {
+    await sendInsuranceOptions(phoneNumberId, wa); // يرسل زرين: شامل / ضد الغير
+    setState(wa, 'AWAIT_INSURANCE_TYPE');
+    return;
+  }
+
+  if (
+    normalizedId.includes('SRV_REGISTRATION') ||
+    normalizedId.includes('REGISTRATION') ||
+    normalizedId.includes('تجديد')
+  ) {
+    await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة تجديد الترخيص وفاحص ✅');
+    setState(wa, 'SRV_REGISTRATION_INFO');
+    return;
+  }
+
+  if (
+    normalizedId.includes('SRV_ROADSIDE') ||
+    normalizedId.includes('ROADSIDE') ||
+    normalizedId.includes('مساعد')
+  ) {
+    await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة المساعدة على الطريق ✅');
+    setState(wa, 'SRV_ROADSIDE_INFO');
+    return;
+  }
+
+  if (
+    normalizedId.includes('SRV_MAINTENANCE') ||
+    normalizedId.includes('MAINTENANCE') ||
+    normalizedId.includes('صيانة')
+  ) {
+    await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة الصيانة ✅');
+    setState(wa, 'SRV_MAINTENANCE_INFO');
     return;
   }
 
   // 3) خيارات التأمين
-  if (id === 'INS_COMP') {
+  if (normalizedId.includes('INS_COMP')) {
     await sendText(phoneNumberId, wa, 'تم اختيار: تأمين شامل. الرجاء الانتظار، سنطلب قيمة الدراجة في الخطوة القادمة ✅');
-    setState(wa, 'INS_COMP_WAIT_VALUE'); // سنفعّل استقبال القيمة لاحقًا
+    setState(wa, 'INS_COMP_WAIT_VALUE'); // (سيتم تفعيل استقبال القيمة في الخطوة القادمة)
     return;
   }
-  if (id === 'INS_TPL') {
+  if (normalizedId.includes('INS_TPL')) {
     await sendText(phoneNumberId, wa, 'شكراً لاختيارك التأمين ضد الغير بتكلفة 400 ريال قطري ✅');
     await saveServiceRequest(wa, { id: 'SRV_INSURANCE_TPL', label: 'تأمين ضد الغير' });
     setState(wa, 'DONE');
     return;
   }
 
-  // غير معروف -> أعد القائمة
+  // غير معروف → إعادة القائمة
   await sendText(phoneNumberId, wa, 'خيار غير معروف. الرجاء اختيار الخدمة من القائمة:');
   await sendServicesList(phoneNumberId, wa);
   setState(wa, 'AWAIT_SERVICE_PICK');
