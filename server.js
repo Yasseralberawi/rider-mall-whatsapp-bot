@@ -1,7 +1,7 @@
-// server.js
-const express = require('express');
-const morgan = require('morgan');
-const axios = require('axios');
+// server.js  (ESM)
+import express from 'express';
+import morgan from 'morgan';
+import axios from 'axios';
 
 const app = express();
 app.use(express.json());
@@ -15,10 +15,13 @@ app.get('/', (_req, res) => {
 
 // تحقق الويبهوك (GET) — استخدم نفس VERIFY_TOKEN الموجود في Meta
 app.get('/webhook', (req, res) => {
-  const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'dev-token';
+  const VERIFY_TOKEN =
+    process.env.WHATSAPP_VERIFY_TOKEN || process.env.VERIFY_TOKEN || 'dev-token';
+
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
+
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
     console.log('Webhook verified ✅');
     return res.status(200).send(challenge);
