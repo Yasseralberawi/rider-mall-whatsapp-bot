@@ -1,15 +1,15 @@
-// server.js (ESM) — Rider Mall WhatsApp Bot
+// server.js (ESM) — Rider Mall WhatsApp Bot: خطوة 3 (ترحيب + زر الخدمات + قائمة الخدمات + خيارات التأمين)
 import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
 import { MongoClient } from 'mongodb';
 
-/* ========= إعدادات ========= */
+/* ========= الإعدادات ========= */
 const PORT = process.env.PORT || 10000;
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || process.env.VERIFY_TOKEN || 'dev-token';
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const FALLBACK_PHONE_ID = process.env.WHATSAPP_PHONE_ID; // احتياطي عند غياب phone_number_id من الWebhook
-const MONGODB_URI = process.env.MONGODB_URI; // يجب أن يحوي مستخدم/كلمة مرور صحيحة
+const FALLBACK_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
+const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = 'rider_mall';
 const COLLECTION = 'servicerequests';
 
@@ -24,16 +24,22 @@ async function getCollection() {
   return mongoClient.db(DB_NAME).collection(COLLECTION);
 }
 
+/* ========= جلسات مبسطة في الذاكرة ========= */
+const sessions = new Map(); // key: waNumber, value: { state, context:{} }
+function setState(wa, state, context = {}) {
+  sessions.set(wa, { state, context: { ...(sessions.get(wa)?.context || {}), ...context } });
+}
+function getState(wa) {
+  return sessions.get(wa) || { state: 'IDLE', context: {} };
+}
+
 /* ========= تطبيق Express ========= */
 const app = express();
 app.use(express.json());
-app.use(morgan('dev')); // يطبع كل الطلبات في اللوجز
+app.use(morgan('dev'));
 
 // فحص سريع
-app.get('/', (_req, res) => {
-  console.log('GET / hit ✅');
-  res.status(200).send('OK');
-});
+app.get('/', (_req, res) => res.status(200).send('OK'));
 
 // Verify Webhook (GET)
 app.get('/webhook', (req, res) => {
@@ -63,14 +69,13 @@ app.post('/webhook', async (req, res) => {
     if (!messages || !messages[0] || !phoneNumberId) return;
 
     const msg = messages[0];
-    const from = msg.from;                 // رقم المرسل
+    const from = msg.from; // رقم المرسل (WhatsApp)
     const type = msg.type;
 
     if (type === 'interactive') {
-      // أزرار منيو أو لائحة
-      const button_reply = msg.interactive?.button_reply;
-      const list_reply = msg.interactive?.list_reply;
-      const selectionId = button_reply?.id || list_reply?.id || '';
+      const btn = msg.interactive?.button_reply;
+      const lst = msg.interactive?.list_reply;
+      const selectionId = btn?.id || lst?.id || '';
       await handleSelection(phoneNumberId, from, selectionId);
       return;
     }
@@ -80,30 +85,24 @@ app.post('/webhook', async (req, res) => {
     if (type === 'text') text = msg.text?.body || '';
     text = normalize(text);
 
-    // كلمات تشغيل المنيو
-    if (['hi','مرحبا','menu','start','ابدأ','ابدا','help','قائمة','منيو'].includes(text)) {
-      await sendMainMenu(phoneNumberId, from);
+    // كلمات الترحيب وبدء المحادثة
+    const greetings = ['مرحبا','السلام عليكم','السلام','هاي','hi','hello','start','ابدا','ابدأ','قائمة','menu','help'];
+    if (greetings.some(g => text.includes(g))) {
+      await sendWelcomeAndServicesButton(phoneNumberId, from);
+      setState(from, 'AWAIT_SERVICES_BUTTON');
       return;
     }
 
-    // اختصارات مباشرة للخدمات
-    const matched = matchService(text);
-    if (matched) {
-      await saveServiceRequest(from, matched);
-      await sendText(phoneNumberId, from, `تم استلام طلبك لخدمة: ${matched.label} ✅\nسيتواصل معك فريق Rider Mall قريبًا.`);
-      return;
-    }
-
-    // إن لم يُفهم النص، أرسل المنيو
-    await sendText(phoneNumberId, from, 'أهلا بك في Rider Mall 👋\nاختر من القائمة التالية:');
-    await sendMainMenu(phoneNumberId, from);
+    // أي نص غير مفهوم -> إعادة إرسال الترحيب + زر الخدمات
+    await sendText(phoneNumberId, from, 'أهلا بك في Rider Mall 👋');
+    await sendWelcomeAndServicesButton(phoneNumberId, from);
+    setState(from, 'AWAIT_SERVICES_BUTTON');
   } catch (e) {
     console.error('Handler error:', e);
   }
 });
 
-/* ========= المنطق المساعد ========= */
-
+/* ========= المنطق ========= */
 function normalize(s='') {
   return s.trim().toLowerCase()
     .replace(/[آأإ]/g,'ا')
@@ -111,40 +110,56 @@ function normalize(s='') {
     .replace(/[^\u0600-\u06FFa-z0-9\s]/g,'');
 }
 
-const SERVICES = [
-  { id: 'SRV_INSURANCE',   label: 'تأمين المركبة' , keywords: ['تامين','تأمين','insurance'] },
-  { id: 'SRV_REGISTRATION',label: 'تجديد التسجيل', keywords: ['تجديد','تسجيل','استماره','registration'] },
-  { id: 'SRV_ROADSIDE',    label: 'مساعدة طريق',   keywords: ['مساعده','طريق','سطحه','roadside'] },
-  { id: 'SRV_SHOP',        label: 'متجر Rider Mall', keywords: ['shop','متجر','اكسسوارات'] },
-  { id: 'SRV_CONTACT',     label: 'التواصل مع فريق الدعم', keywords: ['تواصل','support','help','اتصال'] },
-];
+// التعامل مع اختيارات الأزرار والقوائم
+async function handleSelection(phoneNumberId, wa, id) {
+  const { state } = getState(wa);
 
-function matchService(text) {
-  for (const s of SERVICES) {
-    if (s.keywords.some(k => text.includes(k))) return s;
-  }
-  return null;
-}
-
-async function handleSelection(phoneNumberId, to, selectionId) {
-  const service = SERVICES.find(s => s.id === selectionId);
-  if (!service) {
-    await sendText(phoneNumberId, to, 'خيار غير معروف. اختر من القائمة التالية:');
-    await sendMainMenu(phoneNumberId, to);
+  // 1) زر "عرض الخدمات" -> نرسل قائمة الخدمات
+  if (id === 'BTN_SHOW_SERVICES') {
+    await sendServicesList(phoneNumberId, wa);
+    setState(wa, 'AWAIT_SERVICE_PICK');
     return;
   }
-  // حفظ الطلب
-  await saveServiceRequest(to, service);
-  // رد تأكيد
-  if (service.id === 'SRV_SHOP') {
-    await sendText(phoneNumberId, to, 'تفضل متجر Rider Mall 🛒\nhttps://ridermall.qa/shop');
-  } else if (service.id === 'SRV_CONTACT') {
-    await sendText(phoneNumberId, to, 'تم تحويلك للدعم 📞\nسنتواصل معك قريبًا.');
-  } else {
-    await sendText(phoneNumberId, to, `تم استلام طلبك لخدمة: ${service.label} ✅\nسيتواصل معك فريق Rider Mall قريبًا.`);
+
+  // 2) اختيار خدمة من القائمة
+  if (id === 'SRV_INSURANCE' || id === 'SRV_REGISTRATION' || id === 'SRV_ROADSIDE' || id === 'SRV_MAINTENANCE') {
+    if (id === 'SRV_INSURANCE') {
+      await sendInsuranceOptions(phoneNumberId, wa); // يرسل زرين: شامل / ضد الغير
+      setState(wa, 'AWAIT_INSURANCE_TYPE');
+    } else if (id === 'SRV_REGISTRATION') {
+      await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة تجديد الترخيص وفاحص. (سيتم تفعيل الخطوات التفصيلية في الخطوة القادمة) ✅');
+      setState(wa, 'SRV_REGISTRATION_INFO');
+    } else if (id === 'SRV_ROADSIDE') {
+      await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة المساعدة على الطريق. (سيتم تفعيل السيناريو التفصيلي لاحقًا) ✅');
+      setState(wa, 'SRV_ROADSIDE_INFO');
+    } else if (id === 'SRV_MAINTENANCE') {
+      await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة الصيانة. (سيتم تفعيل السيناريو التفصيلي لاحقًا) ✅');
+      setState(wa, 'SRV_MAINTENANCE_INFO');
+    }
+    return;
   }
+
+  // 3) خيارات التأمين
+  if (id === 'INS_COMP') {
+    // مؤقتًا رد بسيط — سنضيف الحساب والتأكيد بالخطوة القادمة
+    await sendText(phoneNumberId, wa, 'تم اختيار: تأمين شامل. الرجاء الانتظار، سنطلب قيمة الدراجة في الخطوة القادمة ✅');
+    setState(wa, 'INS_COMP_WAIT_VALUE'); // سنفعّل استقبال القيمة لاحقًا
+    return;
+  }
+  if (id === 'INS_TPL') {
+    await sendText(phoneNumberId, wa, 'شكراً لاختيارك التأمين ضد الغير بتكلفة 400 ريال قطري ✅');
+    await saveServiceRequest(wa, { id: 'SRV_INSURANCE_TPL', label: 'تأمين ضد الغير' });
+    setState(wa, 'DONE');
+    return;
+  }
+
+  // غير معروف -> أعد القائمة
+  await sendText(phoneNumberId, wa, 'خيار غير معروف. الرجاء اختيار الخدمة من القائمة:');
+  await sendServicesList(phoneNumberId, wa);
+  setState(wa, 'AWAIT_SERVICE_PICK');
 }
 
+/* ========= حفظ الطلبات ========= */
 async function saveServiceRequest(waNumber, service) {
   try {
     const col = await getCollection();
@@ -162,8 +177,7 @@ async function saveServiceRequest(waNumber, service) {
   }
 }
 
-/* ========= رسائل واتساب ========= */
-
+/* ========= إرسال رسائل واتساب ========= */
 async function sendText(phoneNumberId, to, body) {
   await axios.post(
     `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
@@ -172,14 +186,10 @@ async function sendText(phoneNumberId, to, body) {
   );
 }
 
-async function sendMainMenu(phoneNumberId, to) {
-  // Buttons menu (سريعة وبسيطة)
-  const buttons = [
-    { type: 'reply', reply: { id: 'SRV_INSURANCE',   title: 'تأمين' } },
-    { type: 'reply', reply: { id: 'SRV_REGISTRATION',title: 'تجديد' } },
-    { type: 'reply', reply: { id: 'SRV_ROADSIDE',    title: 'مساعدة' } },
-  ];
-
+// ترحيب + زر الخدمات
+async function sendWelcomeAndServicesButton(phoneNumberId, to) {
+  const welcome =
+    'أهلاً وسهلاً بكم في رايدر مول – المنصة الشاملة لخدمات الدراجات في قطر.\nالرجاء اختيار الخدمة من القائمة.';
   await axios.post(
     `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
     {
@@ -188,15 +198,70 @@ async function sendMainMenu(phoneNumberId, to) {
       type: 'interactive',
       interactive: {
         type: 'button',
-        body: { text: 'اختر خدمة من Rider Mall 👇' },
-        action: { buttons }
+        body: { text: welcome },
+        action: {
+          buttons: [
+            { type: 'reply', reply: { id: 'BTN_SHOW_SERVICES', title: 'عرض الخدمات' } }
+          ]
+        }
       }
     },
     { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
   );
+}
 
-  // زر إضافي بإرسال رابط المتجر/الدعم كنص لاحقًا:
-  await sendText(phoneNumberId, to, 'تقدر تكتب: متجر / تواصل لخيارات إضافية.');
+// قائمة الخدمات (List)
+async function sendServicesList(phoneNumberId, to) {
+  await axios.post(
+    `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        body: { text: 'اختر خدمة من القائمة 👇' },
+        action: {
+          button: 'الخدمات',
+          sections: [
+            {
+              title: 'خدمات Rider Mall',
+              rows: [
+                { id: 'SRV_INSURANCE',   title: 'خدمات التأمين' },
+                { id: 'SRV_REGISTRATION',title: 'خدمات تجديد الترخيص وفاحص' },
+                { id: 'SRV_ROADSIDE',    title: 'خدمات المساعدة على الطريق' },
+                { id: 'SRV_MAINTENANCE', title: 'خدمات الصيانة' }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+  );
+}
+
+// خيارات التأمين (شامل / ضد الغير)
+async function sendInsuranceOptions(phoneNumberId, to) {
+  await axios.post(
+    `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: 'تم اختيار خدمات التأمين، يرجى الاختيار:' },
+        action: {
+          buttons: [
+            { type: 'reply', reply: { id: 'INS_COMP', title: 'تأمين شامل (4%)' } },
+            { type: 'reply', reply: { id: 'INS_TPL',  title: 'تأمين ضد الغير (400 ر.ق)' } }
+          ]
+        }
+      }
+    },
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+  );
 }
 
 /* ========= تشغيل السيرفر ========= */
