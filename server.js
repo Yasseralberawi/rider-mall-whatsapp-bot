@@ -1,5 +1,6 @@
 // server.js (ESM) — Rider Mall WhatsApp Bot
-// v2025-10-29 — Insurance (COMP/TPL) + Registration & Fahes (step-by-step) + robust list/buttons
+// v2025-10-29
+// Insurance (COMP/TPL) + Registration & Fahes (step-by-step) + Roadside Assistance (step-by-step)
 import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
@@ -104,7 +105,7 @@ app.post('/webhook', async (req, res) => {
     if (type === 'text') text = msg.text?.body || '';
     const norm = normalize(text);
 
-    // === GUARD: if waiting INSURANCE docs and user sent text, do NOT greet — just re-prompt ===
+    // === GUARD: Insurance docs waiting — re-prompt (no greeting)
     if (current.state === 'INS_COMP_AWAIT_DOCS') {
       const docs = current.context.docs || [];
       if (docs.length === 0) {
@@ -115,7 +116,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // === GUARD: if waiting REGISTRATION docs and user sent text, re-prompt step-by-step ===
+    // === GUARD: Registration docs waiting — re-prompt (no greeting)
     if (current.state === 'REG_AWAIT_DOCS') {
       const docs = current.context.docs || [];
       if (docs.length === 0) {
@@ -139,7 +140,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // Insurance comprehensive — after quote: allow text choices, too
+    // Insurance comprehensive — after quote text
     if (current.state === 'INS_COMP_QUOTE_SENT') {
       if (['موافق','ok','yes','y'].includes(norm)) {
         await startInsuranceDocsFlow(phoneNumberId, from); // will ask for form image ONLY
@@ -180,6 +181,34 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
+    // Roadside — slot pick by text
+    if (current.state === 'RD_BOOKING_SLOT') {
+      if (norm.includes('صباح') || norm.includes('am') || norm.includes('sabah')) {
+        setState(from, 'RD_COST_CONFIRM', { preferredSlot: 'صباحي' });
+        await sendRoadsideCostConfirm(phoneNumberId, from);
+        return;
+      }
+      if (norm.includes('مساء') || norm.includes('pm') || norm.includes('masai')) {
+        setState(from, 'RD_COST_CONFIRM', { preferredSlot: 'مسائي' });
+        await sendRoadsideCostConfirm(phoneNumberId, from);
+        return;
+      }
+      return;
+    }
+
+    // Roadside — cost confirm by text
+    if (current.state === 'RD_COST_CONFIRM') {
+      if (['موافق','ok','yes','y'].includes(norm)) {
+        await finalizeRoadsideBooking(phoneNumberId, from, current.context.preferredSlot || null);
+        return;
+      }
+      if (norm.includes('غير') || norm.includes('no') || norm === 'x') {
+        await backToMainMenu(phoneNumberId, from);
+        return;
+      }
+      return;
+    }
+
     // greetings
     const greetings = ['مرحبا','السلام عليكم','السلام','هاي','hi','hello','start','ابدا','ابدأ','قائمة','menu','help'];
     if (greetings.some(g => norm.includes(g))) {
@@ -188,7 +217,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // default: send welcome again
+    // default
     await sendText(phoneNumberId, from, 'أهلاً بك في Rider Mall 👋');
     await sendWelcomeAndServicesButton(phoneNumberId, from);
     setState(from, 'AWAIT_SERVICES_BUTTON');
@@ -252,8 +281,8 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
     normalizedId.includes('ROADSIDE') ||
     normalizedId.includes('مساعد')
   ) {
-    await sendText(phoneNumberId, wa, 'شكراً لاختياركم خدمة المساعدة على الطريق ✅ (سنفعّل السيناريو التفصيلي لاحقًا)');
-    setState(wa, 'SRV_ROADSIDE_INFO');
+    await sendRoadsideOptions(phoneNumberId, wa);
+    setState(wa, 'RD_PICK');
     return;
   }
 
@@ -313,6 +342,41 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
     return;
   }
 
+  /* ===== ROADSIDE ===== */
+  // Pick type
+  if (normalizedId === 'RD_EMERGENCY') {
+    await finalizeRoadsideEmergency(phoneNumberId, wa);
+    return;
+  }
+  if (normalizedId === 'RD_BOOK') {
+    await sendRoadsideSlotChoice(phoneNumberId, wa);
+    setState(wa, 'RD_BOOKING_SLOT');
+    return;
+  }
+
+  // Slot for roadside
+  if (normalizedId === 'RD_SLOT_AM') {
+    setState(wa, 'RD_COST_CONFIRM', { preferredSlot: 'صباحي' });
+    await sendRoadsideCostConfirm(phoneNumberId, wa);
+    return;
+  }
+  if (normalizedId === 'RD_SLOT_PM') {
+    setState(wa, 'RD_COST_CONFIRM', { preferredSlot: 'مسائي' });
+    await sendRoadsideCostConfirm(phoneNumberId, wa);
+    return;
+  }
+
+  // Cost confirm roadside
+  if (normalizedId === 'RD_AGREE') {
+    const { preferredSlot } = getState(wa).context || {};
+    await finalizeRoadsideBooking(phoneNumberId, wa, preferredSlot || null);
+    return;
+  }
+  if (normalizedId === 'RD_DISAGREE') {
+    await backToMainMenu(phoneNumberId, wa);
+    return;
+  }
+
   // Unknown
   await sendText(phoneNumberId, wa, 'خيار غير معروف. الرجاء اختيار الخدمة من القائمة:');
   await sendServicesList(phoneNumberId, wa);
@@ -337,18 +401,10 @@ async function sendInsuranceComprehensiveQuote(phoneNumberId, to, premium) {
     'اختر أحد الخيارات:'
   );
 }
-
-// ✅ بعد الموافقة على السعر: نطلب "صورة استمارة الدراجة" فقط
 async function startInsuranceDocsFlow(phoneNumberId, to) {
   setState(to, 'INS_COMP_AWAIT_DOCS', { docs: [] });
-  await sendText(
-    phoneNumberId,
-    to,
-    'الرجاء إرسال **صورة استمارة الدراجة**.'
-  );
+  await sendText(phoneNumberId, to, 'الرجاء إرسال **صورة استمارة الدراجة**.');
 }
-
-// ===== INSURANCE DOCS FLOW (Step-by-step)
 async function handleInsuranceDocsImage(phoneNumberId, wa, mediaId) {
   const st = getState(wa);
   const ctx = st.context || {};
@@ -359,19 +415,13 @@ async function handleInsuranceDocsImage(phoneNumberId, wa, mediaId) {
     return;
   }
 
-  // الصورة الأولى = استمارة الدراجة
   if (docs.length === 0) {
     docs.push({ type: 'image', mediaId, label: 'استمارة الدراجة' });
     setState(wa, 'INS_COMP_AWAIT_DOCS', { docs });
-    await sendText(
-      phoneNumberId,
-      wa,
-      '✅ تم استلام **صورة استمارة الدراجة**.\nالرجاء الآن إرسال **صورة الإقامة القطرية للمالك**.'
-    );
+    await sendText(phoneNumberId, wa, '✅ تم استلام **صورة استمارة الدراجة**.\nالرجاء الآن إرسال **صورة الإقامة القطرية للمالك**.');
     return;
   }
 
-  // الصورة الثانية = الإقامة القطرية
   if (docs.length === 1) {
     docs.push({ type: 'image', mediaId, label: 'الإقامة القطرية للمالك' });
 
@@ -386,18 +436,12 @@ async function handleInsuranceDocsImage(phoneNumberId, wa, mediaId) {
       attachments: docs,
     });
 
-    await sendText(
-      phoneNumberId,
-      wa,
-      '✅ تم استلام جميع الصور بنجاح.\nشكرًا لاختياركم **خدمات التأمين من رايدر مول**.\nسيتم التواصل معكم من ضمن فريق رايدر مول في أقرب وقت ممكن.'
-    );
+    await sendText(phoneNumberId, wa, '✅ تم استلام جميع الصور بنجاح.\nشكرًا لاختياركم **خدمات التأمين من رايدر مول**.\nسيتم التواصل معكم من ضمن فريق رايدر مول في أقرب وقت ممكن.');
     return;
   }
 
-  // أكثر من صورتين → تجاهل الباقي
   await sendText(phoneNumberId, wa, '✅ تم استلام الصور المطلوبة، لا حاجة لإرسال المزيد.');
 }
-
 async function confirmTPL(phoneNumberId, wa) {
   await sendText(phoneNumberId, wa, 'شكراً لاختيارك **التأمين ضد الغير** بتكلفة **400 ريال قطري** ✅');
   await saveServiceRequest(wa, { id: 'SRV_INSURANCE_TPL', label: 'تأمين ضد الغير', price: 400 });
@@ -407,13 +451,8 @@ async function confirmTPL(phoneNumberId, wa) {
 /* ===== REGISTRATION & FAHES (Step-by-step) ===== */
 async function startRegistrationDocsFlow(phoneNumberId, wa) {
   setState(wa, 'REG_AWAIT_DOCS', { docs: [] });
-  await sendText(
-    phoneNumberId,
-    wa,
-    'الرجاء إرسال **صورة استمارة الدراجة**.'
-  );
+  await sendText(phoneNumberId, wa, 'الرجاء إرسال **صورة استمارة الدراجة**.');
 }
-
 async function handleRegistrationDocsImage(phoneNumberId, wa, mediaId) {
   const st = getState(wa);
   const ctx = st.context || {};
@@ -424,19 +463,13 @@ async function handleRegistrationDocsImage(phoneNumberId, wa, mediaId) {
     return;
   }
 
-  // الصورة الأولى = استمارة الدراجة
   if (docs.length === 0) {
     docs.push({ type: 'image', mediaId, label: 'استمارة الدراجة' });
     setState(wa, 'REG_AWAIT_DOCS', { docs });
-    await sendText(
-      phoneNumberId,
-      wa,
-      '✅ تم استلام **صورة استمارة الدراجة**.\nالرجاء الآن إرسال **صورة الإقامة القطرية للمالك**.'
-    );
+    await sendText(phoneNumberId, wa, '✅ تم استلام **صورة استمارة الدراجة**.\nالرجاء الآن إرسال **صورة الإقامة القطرية للمالك**.');
     return;
   }
 
-  // الصورة الثانية = الإقامة القطرية
   if (docs.length === 1) {
     docs.push({ type: 'image', mediaId, label: 'الإقامة القطرية للمالك' });
 
@@ -454,10 +487,8 @@ async function handleRegistrationDocsImage(phoneNumberId, wa, mediaId) {
     return;
   }
 
-  // أكثر من صورتين → تجاهل الباقي
   await sendText(phoneNumberId, wa, '✅ تم استلام الصور المطلوبة، لا حاجة لإرسال المزيد.');
 }
-
 async function sendRegistrationSlotChoice(phoneNumberId, wa) {
   await sendButtons(
     phoneNumberId,
@@ -469,7 +500,6 @@ async function sendRegistrationSlotChoice(phoneNumberId, wa) {
     'شكراً للموافقة. الرجاء اختيار الموعد المناسب:'
   );
 }
-
 async function finalizeRegistration(phoneNumberId, wa, slot) {
   const st = getState(wa);
   const docs = st.context.docs || [];
@@ -485,6 +515,71 @@ async function finalizeRegistration(phoneNumberId, wa, slot) {
     phoneNumberId,
     wa,
     `شكراً لاختياركم **خدمات تجديد الترخيص وفاحص**.\nتم تسجيل موعدك (${slot}) ✅\nسيتم التواصل معكم من ضمن فريق عمل رايدر مول في أقرب وقت ممكن.`
+  );
+  setState(wa, 'DONE');
+}
+
+/* ===== ROADSIDE ASSISTANCE (Step-by-step) ===== */
+async function sendRoadsideOptions(phoneNumberId, wa) {
+  await sendButtons(
+    phoneNumberId,
+    wa,
+    [
+      { id: 'RD_EMERGENCY', title: 'خدمة طارئة' },
+      { id: 'RD_BOOK',      title: 'حجز موعد' }
+    ],
+    'شكراً لاختياركم **المساعدة على الطريق**. يرجى الاختيار:'
+  );
+}
+async function finalizeRoadsideEmergency(phoneNumberId, wa) {
+  await saveServiceRequest(wa, {
+    id: 'SRV_ROADSIDE_EMERGENCY',
+    label: 'مساعدة الطريق - طارئة',
+    price: null,
+    preferredSlot: null,
+    attachments: []
+  });
+  await sendText(
+    phoneNumberId,
+    wa,
+    'شكراً لاستخدامكم **خدمات رايدر مول للمساعدة على الطريق والنقل**.\nسيتم التواصل معكم فورًا.'
+  );
+  setState(wa, 'DONE');
+}
+async function sendRoadsideSlotChoice(phoneNumberId, wa) {
+  await sendButtons(
+    phoneNumberId,
+    wa,
+    [
+      { id: 'RD_SLOT_AM', title: 'صباحي' },
+      { id: 'RD_SLOT_PM', title: 'مسائي' }
+    ],
+    'هل تفضل موعد **صباحي** أم **مسائي**؟'
+  );
+}
+async function sendRoadsideCostConfirm(phoneNumberId, wa) {
+  await sendButtons(
+    phoneNumberId,
+    wa,
+    [
+      { id: 'RD_AGREE',    title: 'موافق' },
+      { id: 'RD_DISAGREE', title: 'غير موافق' }
+    ],
+    'يرجى تأكيد الموافقة على التكلفة **200 ريال قطري**:'
+  );
+}
+async function finalizeRoadsideBooking(phoneNumberId, wa, slot) {
+  await saveServiceRequest(wa, {
+    id: 'SRV_ROADSIDE_BOOKING',
+    label: 'مساعدة الطريق - حجز',
+    price: 200,
+    preferredSlot: slot,
+    attachments: []
+  });
+  await sendText(
+    phoneNumberId,
+    wa,
+    'شكراً لاستخدامكم **خدمات المساعدة على الطريق والنقل**.\nسيتم التواصل معكم قريبًا.'
   );
   setState(wa, 'DONE');
 }
@@ -531,7 +626,6 @@ async function sendText(phoneNumberId, to, body) {
     console.error('WA sendText error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
   }
 }
-
 async function sendButtons(phoneNumberId, to, buttonsArr, bodyText) {
   try {
     await axios.post(
@@ -618,7 +712,6 @@ async function sendServicesList(phoneNumberId, to) {
     await sendServicesButtonsFallback(phoneNumberId, to);
   }
 }
-
 async function sendServicesButtonsFallback(phoneNumberId, to) {
   try {
     await axios.post(
