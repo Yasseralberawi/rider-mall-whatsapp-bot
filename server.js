@@ -1,5 +1,5 @@
 // server.js (ESM) — Rider Mall WhatsApp Bot + Admin Dashboard
-// v2025-10-29-b (thumbnails + download + statuses + CSV + filter)
+// v2025-10-29-c (welcome+list on first message)
 import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
@@ -194,18 +194,17 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // greetings
+    // greetings — NOW: send welcome + list directly
     const greetings = ['مرحبا','السلام عليكم','السلام','هاي','hi','hello','start','ابدا','ابدأ','قائمة','menu','help'];
     if (greetings.some(g => norm.includes(g))) {
-      await sendWelcomeAndServicesButton(phoneNumberId, from);
-      setState(from, 'AWAIT_SERVICES_BUTTON');
+      await sendWelcomeWithList(phoneNumberId, from);
+      setState(from, 'AWAIT_SERVICE_PICK');
       return;
     }
 
-    // default
-    await sendText(phoneNumberId, from, 'أهلاً بك في Rider Mall 👋');
-    await sendWelcomeAndServicesButton(phoneNumberId, from);
-    setState(from, 'AWAIT_SERVICES_BUTTON');
+    // default fallback -> welcome + list as well
+    await sendWelcomeWithList(phoneNumberId, from);
+    setState(from, 'AWAIT_SERVICE_PICK');
   } catch (e) {
     console.error('Handler error:', e);
   }
@@ -233,6 +232,7 @@ async function handleSelection(phoneNumberId, wa, idRaw) {
   const normalizedId = id.toUpperCase();
   console.log('➡️ User selected option ID:', id, 'Current state:', state);
 
+  // (kept for compatibility, but we no longer send this button)
   if (id === 'BTN_SHOW_SERVICES') {
     await sendServicesList(phoneNumberId, wa);
     setState(wa, 'AWAIT_SERVICE_PICK');
@@ -428,8 +428,8 @@ async function finalizeRoadsideBooking(phoneNumberId, wa, slot) {
 /* ===== COMMON ===== */
 async function backToMainMenu(phoneNumberId, wa) {
   await sendText(phoneNumberId, wa, 'تم إلغاء الطلب. بإمكانك اختيار خدمة جديدة من القائمة:');
-  await sendWelcomeAndServicesButton(phoneNumberId, wa);
-  setState(wa, 'AWAIT_SERVICES_BUTTON', { bikeValue:null, premium:null, docs:[] });
+  await sendWelcomeWithList(phoneNumberId, wa);
+  setState(wa, 'AWAIT_SERVICE_PICK', { bikeValue:null, premium:null, docs:[] });
 }
 
 /* ===== PERSISTENCE ===== */
@@ -489,28 +489,15 @@ async function sendButtons(phoneNumberId, to, buttonsArr, bodyText) {
     console.error('WA buttons error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
   }
 }
-async function sendWelcomeAndServicesButton(phoneNumberId, to) {
+
+// NEW: welcome with list immediately (no "عرض الخدمات" button)
+async function sendWelcomeWithList(phoneNumberId, to) {
   const welcome = 'أهلاً وسهلاً بكم في رايدر مول – المنصة الشاملة لخدمات الدراجات في قطر.\nالرجاء اختيار الخدمة من القائمة.';
-  try {
-    await axios.post(
-      `https://graph.facebook.com/${API_VERSION}/${phoneNumberId}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'button',
-          body: { text: welcome },
-          action: { buttons: [ { type:'reply', reply:{ id:'BTN_SHOW_SERVICES', title:'عرض الخدمات' } } ] }
-        }
-      },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
-    );
-  } catch (e) {
-    console.error('WA welcome button error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
-  }
+  await sendServicesList(phoneNumberId, to, welcome);
 }
-async function sendServicesList(phoneNumberId, to) {
+
+// Accept custom body text for the list
+async function sendServicesList(phoneNumberId, to, bodyText = 'اختر خدمة من القائمة 👇') {
   try {
     await axios.post(
       `https://graph.facebook.com/${API_VERSION}/${phoneNumberId}/messages`,
@@ -520,7 +507,7 @@ async function sendServicesList(phoneNumberId, to) {
         type: 'interactive',
         interactive: {
           type: 'list',
-          body: { text: 'اختر خدمة من القائمة 👇' },
+          body: { text: bodyText },
           action: {
             button: 'الخدمات',
             sections: [
@@ -710,11 +697,9 @@ app.get('/api/admin/export', adminAuth, async (req, res) => {
 });
 
 /* ==== MEDIA PROXY (WhatsApp) ==== */
-// 1) GET media info to fetch URL  2) GET the file stream and pipe to client
 app.get('/api/admin/media/:mediaId', adminAuth, async (req, res) => {
   const { mediaId } = req.params;
   try {
-    // Step 1: get media URL
     const meta = await axios.get(
       `https://graph.facebook.com/${API_VERSION}/${mediaId}`,
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
@@ -722,13 +707,11 @@ app.get('/api/admin/media/:mediaId', adminAuth, async (req, res) => {
     const mediaUrl = meta.data?.url;
     if (!mediaUrl) return res.status(404).send('No media url');
 
-    // Step 2: fetch the binary with auth and stream
     const fileRes = await axios.get(mediaUrl, {
       headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
       responseType: 'stream'
     });
 
-    // Pass through headers (basic)
     if (fileRes.headers['content-type']) res.setHeader('Content-Type', fileRes.headers['content-type']);
     if (fileRes.headers['content-length']) res.setHeader('Content-Length', fileRes.headers['content-length']);
 
@@ -895,7 +878,6 @@ app.get('/admin', async (_req, res) => {
         <tbody>\${rows}</tbody>
       </table>\`;
 
-    // bind save buttons
     elTable.querySelectorAll('.saveBtn').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         const tr=btn.closest('tr'); const id=tr.getAttribute('data-id');
@@ -917,7 +899,7 @@ app.get('/admin', async (_req, res) => {
     if(q) url.searchParams.set('q', q);
     if(serviceId) url.searchParams.set('serviceId', serviceId);
     if(status) url.searchParams.set('status', status);
-    url.searchParams.set('key', key); // للسماح بالتنزيل في تبويب جديد
+    url.searchParams.set('key', key);
     window.open(url.toString(), '_blank');
   });
 
