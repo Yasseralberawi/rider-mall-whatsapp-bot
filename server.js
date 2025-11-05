@@ -138,7 +138,15 @@ app.post('/webhook', async (req, res) => {
     const entry = req.body?.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
-    const phoneNumberId = value?.metadata?.phone_number_id || FALLBACK_PHONE_ID;
+// استخدم رقم واتساب الحقيقي من ENV دائماً
+const phoneNumberId = FALLBACK_PHONE_ID || value?.metadata?.phone_number_id;
+
+// ولو حاب تمنع أي ID وهمي من اختبارات Meta:
+const metaId = value?.metadata?.phone_number_id;
+if (metaId && metaId !== '123456123') {
+  // ممكن ترجع له فقط إذا كان حقيقي (اختياري)
+  // phoneNumberId = metaId;
+}
     const messages = value?.messages;
     if (!messages || !messages[0] || !phoneNumberId) return;
 
@@ -307,4 +315,5 @@ app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${POR
 
 process.on('uncaughtException', e => console.error('❌ uncaughtException', e));
 process.on('unhandledRejection', e => console.error('❌ unhandledRejection', e));
+
 
