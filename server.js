@@ -3,7 +3,75 @@ import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
 import { MongoClient, ObjectId } from 'mongodb';
+// NEW: welcome with list immediately (no "عرض الخدمات" button)
+async function sendWelcomeWithList(phoneNumberId, to) {
+  const welcome = 'أهلاً وسهلاً بكم في رايدر مول – المنصة الشاملة لخدمات الدراجات في قطر.\nالرجاء اختيار الخدمة من القائمة.';
+  await sendServicesList(phoneNumberId, to, welcome);
+}
 
+// Accept custom body text for the list
+async function sendServicesList(phoneNumberId, to, bodyText = 'اختر خدمة من القائمة 👇') {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/${API_VERSION}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'list',
+          body: { text: bodyText },
+          action: {
+            button: 'الخدمات',
+            sections: [
+              {
+                title: 'خدمات Rider Mall',
+                rows: [
+                  { id: 'SRV_INSURANCE',    title: 'التأمين' },
+                  { id: 'SRV_REGISTRATION', title: 'التجديد وفاحص' },
+                  { id: 'SRV_ROADSIDE',     title: 'مساعدة الطريق' },
+                  { id: 'SRV_MAINTENANCE',  title: 'الصيانة' }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (e) {
+    console.error('WA list error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
+    await sendServicesButtonsFallback(phoneNumberId, to);
+  }
+}
+
+async function sendServicesButtonsFallback(phoneNumberId, to) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/${API_VERSION}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'button',
+          body: { text: 'اختر خدمة من الأزرار التالية:' },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'SRV_INSURANCE',    title: 'التأمين' } },
+              { type: 'reply', reply: { id: 'SRV_REGISTRATION', title: 'التجديد وفاحص' } },
+              { type: 'reply', reply: { id: 'SRV_ROADSIDE',     title: 'مساعدة الطريق' } }
+            ]
+          }
+        }
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+    await sendText(phoneNumberId, to, 'لخدمة الصيانة: اكتب "صيانة" أو اخترها من القائمة لاحقًا.');
+  } catch (e) {
+    console.error('WA fallback buttons error:', JSON.stringify(e?.response?.data || { message: e.message }, null, 2));
+  }
+}
 /* ========= SETTINGS ========= */
 const PORT = process.env.PORT || 10000;
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || process.env.VERIFY_TOKEN || 'dev-token';
@@ -239,3 +307,4 @@ app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${POR
 
 process.on('uncaughtException', e => console.error('❌ uncaughtException', e));
 process.on('unhandledRejection', e => console.error('❌ unhandledRejection', e));
+
