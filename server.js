@@ -157,11 +157,14 @@ if (metaId && metaId !== '123456123') {
 
     // interactive
     if (type === 'interactive') {
-      const btn = msg.interactive?.button_reply;
-      const lst = msg.interactive?.list_reply;
-      const selectionId = (btn?.id || lst?.id || '').trim();
-      await handleSelection(phoneNumberId, from, selectionId);
-      return;
+  const btn = msg.interactive?.button_reply;
+  const lst = msg.interactive?.list_reply;
+  const selectionId = (btn?.id || lst?.id || '').trim();
+  console.log('🔹 Interactive payload:', JSON.stringify(msg.interactive));
+  console.log('➡️ User selected option ID:', selectionId);
+  await handleSelection(phoneNumberId, from, selectionId);
+  return;
+}
     }
 
     // images (docs step-by-step)
@@ -315,5 +318,6 @@ app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${POR
 
 process.on('uncaughtException', e => console.error('❌ uncaughtException', e));
 process.on('unhandledRejection', e => console.error('❌ unhandledRejection', e));
+
 
 
